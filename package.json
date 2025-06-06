@@ -1,7 +1,7 @@
 {
-  "name": "telescope-like-search",
-  "displayName": "Telescope-Like Search",
-  "description": "Live fuzzy content search with preview using ripgrep (Telescope.nvim-style)",
+  "name": "live-search",
+  "displayName": "Live Search",
+  "description": "Live fuzzy content search with preview using ripgrep",
   "version": "1.1.0",
   "engines": {
     "vscode": "^1.100.0"
@@ -26,5 +26,22 @@
   },
   "dependencies": {
     "lodash.debounce": "^4.0.8"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krshrimali/vscode-live-search"
+  },
+  "license": "MIT",
+  "keywords": [
+    "vscode",
+    "search",
+    "telescope",
+    "fuzzy",
+    "live",
+    "preview",
+    "ripgrep",
+    "extension"
+  ],
+  "author": "Kushashwa Ravi Shrimali",
+  "publisher": "tgkrs"
 }
