@@ -1,0 +1,30 @@
+{
+  "name": "telescope-like-search",
+  "displayName": "Telescope-Like Search",
+  "description": "Live fuzzy content search with preview using ripgrep (Telescope.nvim-style)",
+  "version": "1.0.8",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "telescopeLikeSearch.start",
+        "title": "Telescope-Like Search"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/lodash.debounce": "^4.0.9",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.100.0",
+    "typescript": "5.8.3"
+  },
+  "dependencies": {
+    "lodash.debounce": "^4.0.8"
+  }
+}
