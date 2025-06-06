@@ -3,7 +3,6 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import debounce from 'lodash.debounce';
 
-
 interface SearchResult extends vscode.QuickPickItem {
   filePath: string;
   line: number;
@@ -43,6 +42,8 @@ export function activate(context: vscode.ExtensionContext) {
         '--hidden',
         '--no-heading',
         '--color', 'never',
+        '--max-count', '300',
+        '--text',
         query,
         workspaceFolder
       ], { cwd: workspaceFolder });
@@ -54,36 +55,36 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       currentProcess.on('close', () => {
-        const lines = buffer.split('\n');
-        const results: SearchResult[] = [];
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
-          if (match) {
-            const [, file, lineNum, text] = match;
-            results.push({
-              label: `${path.relative(workspaceFolder, file)}:${lineNum}`,
-              description: text.trim(),
-              detail: file,
-              filePath: file,
-              line: parseInt(lineNum, 10) - 1
-            });
-          }
-        }
-
         setTimeout(() => {
+          const lines = buffer.split('\n');
+          const results: SearchResult[] = [];
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+            if (match) {
+              const [, file, lineNum, text] = match;
+              results.push({
+                label: `${path.relative(workspaceFolder, file)}:${lineNum}`,
+                description: text.trim(),
+                detail: file,
+                filePath: file,
+                line: parseInt(lineNum, 10) - 1
+              });
+            }
+          }
+
           quickPick.busy = false;
           quickPick.items = results.length > 0
             ? results
             : [{
-              label: 'No matches found',
-              description: '',
-              detail: '',
-              filePath: '',
-              line: -1
-            }];
-        }, 30);
+                label: 'No matches found',
+                description: '',
+                detail: '',
+                filePath: '',
+                line: -1
+              }];
+        }, 0); // allow UI to render before updating items
       });
     };
 
@@ -92,10 +93,6 @@ export function activate(context: vscode.ExtensionContext) {
     }, 150);
 
     quickPick.onDidChangeValue(debouncedSearch);
-
-    // quickPick.onDidChangeValue((value: string) => {
-    //   runRipgrep(value);
-    // });
 
     quickPick.onDidChangeSelection((selection: readonly SearchResult[]) => {
       const selected = selection[0];
@@ -139,4 +136,4 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(disposable);
 }
 
-export function deactivate() { }
+export function deactivate() {}

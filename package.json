@@ -2,7 +2,7 @@
   "name": "telescope-like-search",
   "displayName": "Telescope-Like Search",
   "description": "Live fuzzy content search with preview using ripgrep (Telescope.nvim-style)",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "engines": {
     "vscode": "^1.100.0"
   },
