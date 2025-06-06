@@ -6,10 +6,12 @@ import debounce from 'lodash.debounce';
 interface SearchResult extends vscode.QuickPickItem {
   filePath: string;
   line: number;
+  text: string;
 }
 
 let lastSearchResults: SearchResult[] = [];
 let workspaceFolder: string | undefined;
+const PREVIEW_LINE_CONTEXT = 2;
 
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand('telescopeLikeSearch.start', async () => {
@@ -27,40 +29,11 @@ export function activate(context: vscode.ExtensionContext) {
     quickPick.buttons = [
       {
         iconPath: new vscode.ThemeIcon('output'),
-        tooltip: 'Show all results as Markdown'
+        tooltip: 'View search results options'
       }
     ];
 
     let currentProcess: ReturnType<typeof spawn> | null = null;
-
-    const updateWebview = (title: string, content: string, query: string) => {
-      const safeContent = content
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-
-      const highlighted = safeContent.replace(
-        new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
-        (match) => `<mark>${match}</mark>`
-      );
-
-      if (!previewPanel) {
-        previewPanel = vscode.window.createWebviewPanel(
-          'searchPreview',
-          'Preview',
-          vscode.ViewColumn.Beside,
-          { enableScripts: false }
-        );
-      }
-
-      previewPanel.title = `Preview: ${title}`;
-      previewPanel.webview.html = `
-        <html>
-          <body style="font-family: monospace; white-space: pre-wrap; padding: 1em;">
-            <h3>${title}</h3>
-            <pre>${highlighted}</pre>
-          </body>
-        </html>`;
-    };
 
     const runRipgrep = (query: string) => {
       if (currentProcess) currentProcess.kill();
@@ -107,7 +80,8 @@ export function activate(context: vscode.ExtensionContext) {
                 description: text.trim(),
                 detail: file,
                 filePath: file,
-                line: parseInt(lineNum, 10) - 1
+                line: parseInt(lineNum, 10) - 1,
+                text: text.trim()
               });
             }
           }
@@ -122,7 +96,8 @@ export function activate(context: vscode.ExtensionContext) {
               description: '',
               detail: '',
               filePath: '',
-              line: -1
+              line: -1,
+              text: ''
             }];
         }, 0);
       });
@@ -139,35 +114,105 @@ export function activate(context: vscode.ExtensionContext) {
       if (selected && selected.line >= 0) {
         const uri = vscode.Uri.file(selected.filePath);
         vscode.workspace.openTextDocument(uri).then((doc: vscode.TextDocument) => {
-          const start = Math.max(0, selected.line - 5);
-          const end = Math.min(doc.lineCount, selected.line + 5);
+          const start = Math.max(0, selected.line - PREVIEW_LINE_CONTEXT);
+          const end = Math.min(doc.lineCount, selected.line + PREVIEW_LINE_CONTEXT);
           const preview = doc.getText(new vscode.Range(start, 0, end, 0));
-          updateWebview(path.basename(selected.filePath), preview, quickPick.value);
+
+          const safeContent = preview
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(new RegExp(quickPick.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+              (match) => `<mark>${match}</mark>`);
+
+          if (!previewPanel) {
+            previewPanel = vscode.window.createWebviewPanel(
+              'searchPreview',
+              'Preview',
+              vscode.ViewColumn.Beside,
+              { enableScripts: false }
+            );
+          }
+
+          previewPanel.title = `Preview: ${path.basename(selected.filePath)} @${selected.line + 1}`;
+          previewPanel.webview.html = `
+            <html><body style="font-family: monospace; white-space: pre-wrap; padding: 1em;">
+              <pre>${safeContent}</pre>
+            </body></html>`;
         });
       }
     });
 
-    quickPick.onDidTriggerButton(() => {
-      if (!lastSearchResults.length) return;
-      const markdownContent = lastSearchResults.map(r => {
-        const link = `vscode://file/${r.filePath}:${r.line + 1}`;
-        return `- <a href=\"${link}\">${path.relative(workspaceFolder!, r.filePath)}:${r.line + 1}</a> - ${r.description}`;
-      }).join('<br/>');
+    quickPick.onDidTriggerButton(async () => {
+      const selected = await vscode.window.showQuickPick([
+        { label: '📄 Open in Search Editor', value: 'search-editor' },
+        { label: '🧾 Export to Markdown View (webview)', value: 'markdown' },
+        { label: '📋 Add to Problems Panel', value: 'problems' },
+        { label: '❌ Cancel', value: 'cancel' }
+      ], { placeHolder: 'Select result view mode' });
 
-      const panel = vscode.window.createWebviewPanel(
-        'searchResults',
-        'Search Results',
-        vscode.ViewColumn.Beside,
-        { enableScripts: true }
-      );
+      if (!selected || selected.value === 'cancel') return;
 
-      panel.webview.html = `
-        <html>
-        <body style=\"font-family: sans-serif; padding: 1em;\">
-          <h2>Search Results</h2>
-          ${markdownContent}
-        </body>
-        </html>`;
+      if (selected.value === 'search-editor') {
+        const grouped: Record<string, SearchResult[]> = {};
+        for (const res of lastSearchResults) {
+          if (!grouped[res.filePath]) grouped[res.filePath] = [];
+          grouped[res.filePath].push(res);
+        }
+
+        let content = '';
+        for (const [file, entries] of Object.entries(grouped)) {
+          content += `${file}\n`;
+          for (const entry of entries) {
+            content += `  ${entry.line + 1}: ${entry.text}\n`;
+          }
+          content += '\n';
+        }
+
+        const doc = await vscode.workspace.openTextDocument({
+          content: content.trim(),
+          language: 'search-result'
+        });
+        vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+      }
+
+      if (selected.value === 'markdown') {
+        const panel = vscode.window.createWebviewPanel(
+          'searchMarkdownResults',
+          'Search Markdown Results',
+          vscode.ViewColumn.Beside,
+          { enableScripts: true, enableCommandUris: true }
+        );
+
+        let html = '<html><body style="font-family: monospace; padding: 1em;">';
+        for (const res of lastSearchResults) {
+          const uri = vscode.Uri.file(res.filePath).with({ fragment: `L${res.line + 1}` });
+          const cmdUri = `command:vscode.open?${encodeURIComponent(JSON.stringify([uri]))}`;
+          html += `<div><a href="${cmdUri}">${path.relative(workspaceFolder!, res.filePath)}:${res.line + 1}</a>: ${res.text}</div>`;
+        }
+        html += '</body></html>';
+
+        panel.webview.html = html;
+      }
+
+      if (selected.value === 'problems') {
+        const diagnostics: vscode.Diagnostic[] = [];
+        const diagnosticsMap: Map<string, vscode.Diagnostic[]> = new Map();
+
+        for (const res of lastSearchResults) {
+          const range = new vscode.Range(res.line, 0, res.line, res.text.length);
+          const diagnostic = new vscode.Diagnostic(range, res.text, vscode.DiagnosticSeverity.Information);
+          diagnostic.source = 'TelescopeSearch';
+          if (!diagnosticsMap.has(res.filePath)) {
+            diagnosticsMap.set(res.filePath, []);
+          }
+          diagnosticsMap.get(res.filePath)?.push(diagnostic);
+        }
+
+        for (const [file, fileDiagnostics] of diagnosticsMap.entries()) {
+          const uri = vscode.Uri.file(file);
+          vscode.languages.createDiagnosticCollection('TelescopeSearch').set(uri, fileDiagnostics);
+        }
+      }
     });
 
     quickPick.onDidAccept(async () => {
