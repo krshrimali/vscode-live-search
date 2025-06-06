@@ -17,12 +17,32 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const quickPick = vscode.window.createQuickPick<SearchResult>();
-    const previewPanel = vscode.window.createOutputChannel('Preview');
+    let previewPanel: vscode.WebviewPanel | undefined;
 
     quickPick.placeholder = 'Search content with ripgrep...';
     quickPick.matchOnDescription = true;
 
     let currentProcess: ReturnType<typeof spawn> | null = null;
+
+    const updateWebview = (title: string, content: string) => {
+      if (!previewPanel) {
+        previewPanel = vscode.window.createWebviewPanel(
+          'searchPreview',
+          'Preview',
+          vscode.ViewColumn.Beside,
+          { enableScripts: false }
+        );
+      }
+
+      previewPanel.title = `Preview: ${title}`;
+      previewPanel.webview.html = `
+        <html>
+          <body style="font-family: monospace; white-space: pre; padding: 1em;">
+            <h3>${title}</h3>
+            <pre>${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+          </body>
+        </html>`;
+    };
 
     const runRipgrep = (query: string) => {
       if (currentProcess) currentProcess.kill();
@@ -84,7 +104,7 @@ export function activate(context: vscode.ExtensionContext) {
                 filePath: '',
                 line: -1
               }];
-        }, 0); // allow UI to render before updating items
+        }, 0);
       });
     };
 
@@ -102,10 +122,7 @@ export function activate(context: vscode.ExtensionContext) {
           const start = Math.max(0, selected.line - 5);
           const end = Math.min(doc.lineCount, selected.line + 5);
           const preview = doc.getText(new vscode.Range(start, 0, end, 0));
-          previewPanel.clear();
-          previewPanel.appendLine(`--- ${path.basename(selected.filePath)} @ line ${selected.line + 1} ---`);
-          previewPanel.appendLine(preview);
-          previewPanel.show(true);
+          updateWebview(path.basename(selected.filePath), preview);
         });
       }
     });
@@ -120,14 +137,21 @@ export function activate(context: vscode.ExtensionContext) {
         editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
       }
       quickPick.hide();
-      previewPanel.dispose();
+      previewPanel?.dispose();
       currentProcess?.kill();
     });
 
     quickPick.onDidHide(() => {
       quickPick.dispose();
-      previewPanel.dispose();
+      previewPanel?.dispose();
       currentProcess?.kill();
+    });
+
+    // Optional keyboard support (Tab, Enter, Escape)
+    quickPick.onDidTriggerButton((button) => {
+      if (button.tooltip === 'Close') {
+        quickPick.hide();
+      }
     });
 
     quickPick.show();
