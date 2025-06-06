@@ -8,9 +8,12 @@ interface SearchResult extends vscode.QuickPickItem {
   line: number;
 }
 
+let lastSearchResults: SearchResult[] = [];
+let workspaceFolder: string | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand('telescopeLikeSearch.start', async () => {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceFolder) {
       vscode.window.showErrorMessage('No workspace folder open.');
       return;
@@ -21,10 +24,25 @@ export function activate(context: vscode.ExtensionContext) {
 
     quickPick.placeholder = 'Search content with ripgrep...';
     quickPick.matchOnDescription = true;
+    quickPick.buttons = [
+      {
+        iconPath: new vscode.ThemeIcon('output'),
+        tooltip: 'Show all results as Markdown'
+      }
+    ];
 
     let currentProcess: ReturnType<typeof spawn> | null = null;
 
-    const updateWebview = (title: string, content: string) => {
+    const updateWebview = (title: string, content: string, query: string) => {
+      const safeContent = content
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+      const highlighted = safeContent.replace(
+        new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+        (match) => `<mark>${match}</mark>`
+      );
+
       if (!previewPanel) {
         previewPanel = vscode.window.createWebviewPanel(
           'searchPreview',
@@ -37,9 +55,9 @@ export function activate(context: vscode.ExtensionContext) {
       previewPanel.title = `Preview: ${title}`;
       previewPanel.webview.html = `
         <html>
-          <body style="font-family: monospace; white-space: pre; padding: 1em;">
+          <body style="font-family: monospace; white-space: pre-wrap; padding: 1em;">
             <h3>${title}</h3>
-            <pre>${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>
+            <pre>${highlighted}</pre>
           </body>
         </html>`;
     };
@@ -65,7 +83,7 @@ export function activate(context: vscode.ExtensionContext) {
         '--max-count', '300',
         '--text',
         query,
-        workspaceFolder
+        workspaceFolder!
       ], { cwd: workspaceFolder });
 
       if (currentProcess.stdout) {
@@ -85,7 +103,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (match) {
               const [, file, lineNum, text] = match;
               results.push({
-                label: `${path.relative(workspaceFolder, file)}:${lineNum}`,
+                label: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
                 description: text.trim(),
                 detail: file,
                 filePath: file,
@@ -94,16 +112,18 @@ export function activate(context: vscode.ExtensionContext) {
             }
           }
 
+          lastSearchResults = results;
+
           quickPick.busy = false;
           quickPick.items = results.length > 0
             ? results
             : [{
-                label: 'No matches found',
-                description: '',
-                detail: '',
-                filePath: '',
-                line: -1
-              }];
+              label: 'No matches found',
+              description: '',
+              detail: '',
+              filePath: '',
+              line: -1
+            }];
         }, 0);
       });
     };
@@ -122,9 +142,32 @@ export function activate(context: vscode.ExtensionContext) {
           const start = Math.max(0, selected.line - 5);
           const end = Math.min(doc.lineCount, selected.line + 5);
           const preview = doc.getText(new vscode.Range(start, 0, end, 0));
-          updateWebview(path.basename(selected.filePath), preview);
+          updateWebview(path.basename(selected.filePath), preview, quickPick.value);
         });
       }
+    });
+
+    quickPick.onDidTriggerButton(() => {
+      if (!lastSearchResults.length) return;
+      const markdownContent = lastSearchResults.map(r => {
+        const link = `vscode://file/${r.filePath}:${r.line + 1}`;
+        return `- <a href=\"${link}\">${path.relative(workspaceFolder!, r.filePath)}:${r.line + 1}</a> - ${r.description}`;
+      }).join('<br/>');
+
+      const panel = vscode.window.createWebviewPanel(
+        'searchResults',
+        'Search Results',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
+      );
+
+      panel.webview.html = `
+        <html>
+        <body style=\"font-family: sans-serif; padding: 1em;\">
+          <h2>Search Results</h2>
+          ${markdownContent}
+        </body>
+        </html>`;
     });
 
     quickPick.onDidAccept(async () => {
@@ -145,13 +188,6 @@ export function activate(context: vscode.ExtensionContext) {
       quickPick.dispose();
       previewPanel?.dispose();
       currentProcess?.kill();
-    });
-
-    // Optional keyboard support (Tab, Enter, Escape)
-    quickPick.onDidTriggerButton((button) => {
-      if (button.tooltip === 'Close') {
-        quickPick.hide();
-      }
     });
 
     quickPick.show();
