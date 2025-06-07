@@ -109,6 +109,21 @@ export function activate(context: vscode.ExtensionContext) {
             }
           }
 
+          // Heuristic sorting by relevance
+          results.sort((a, b) => {
+            const score = (res: SearchResult): number => {
+              const fileDepth = res.filePath.split(path.sep).length;
+              const startMatch = res.text.toLowerCase().startsWith(query.toLowerCase()) ? 100 : 0;
+              const substringMatch = res.text.toLowerCase().includes(query.toLowerCase()) ? 50 : 0;
+              const wordCount =  (res.text.toLowerCase().match(new RegExp(query.toLowerCase(), 'g')) || []).length;
+              const lineScore = Math.max(30 - res.line, 0);
+              const filePathScore = Math.max(20 - fileDepth, 0);
+              return startMatch + substringMatch + wordCount * 10 + lineScore + filePathScore;
+            };
+
+            return score(b) - score(a);  // descending!
+          });
+
           lastSearchResults = results;
 
           quickPick.items = results.length > 0
