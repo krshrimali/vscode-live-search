@@ -14,6 +14,103 @@ let workspaceFolder: string | undefined;
 const PREVIEW_LINE_CONTEXT = 2;
 
 export function activate(context: vscode.ExtensionContext) {
+  let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
+
+  const showCodeLensView = async () => {
+    const grouped: Record<string, SearchResult[]> = {};
+    for (const res of lastSearchResults) {
+      if (!grouped[res.filePath]) grouped[res.filePath] = [];
+      grouped[res.filePath].push(res);
+    }
+
+    const lines: string[] = [];
+    const lensMap: { line: number, result: SearchResult }[] = [];
+
+    for (const [file, results] of Object.entries(grouped)) {
+      lines.push(`📁 ${file}`);
+      for (const res of results) {
+        const lineNum = lines.length;
+        lensMap.push({ line: lineNum, result: res });
+        lines.push(`   → Line ${res.line + 1}: ${res.text}`);
+
+        try {
+          const doc = await vscode.workspace.openTextDocument(res.filePath);
+          const start = Math.max(0, res.line - 1);
+          const end = Math.min(doc.lineCount, res.line + 2);
+          const context = doc.getText(new vscode.Range(start, 0, end, 0)).split('\n');
+          for (const ctxLine of context) {
+            lines.push(`      ${ctxLine}`);
+          }
+          lines.push('');
+        } catch (e) {
+          lines.push('      [Unable to preview context]');
+          lines.push('');
+        }
+      }
+      lines.push('');
+    }
+
+    const virtualUri = vscode.Uri.parse('telescope-search:/results');
+    const content = lines.join('\n');
+
+    const provider = new (class implements vscode.TextDocumentContentProvider {
+      provideTextDocumentContent() {
+        return content;
+      }
+    })();
+
+    const codeLensProvider = new GroupedCodeLensProvider(lensMap);
+
+    context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider('telescope-search', provider),
+      vscode.languages.registerCodeLensProvider({ scheme: 'telescope-search' }, codeLensProvider)
+    );
+
+    const doc = await vscode.workspace.openTextDocument(virtualUri);
+    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+
+    const lineToResultMap = new Map<number, SearchResult>();
+    for (const item of lensMap) lineToResultMap.set(item.line, item.result);
+
+    const openCommand = vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.toString() !== virtualUri.toString()) return;
+      const line = editor.selection.active.line;
+      const result = lineToResultMap.get(line);
+      if (result) {
+        const doc = await vscode.workspace.openTextDocument(result.filePath);
+        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        const pos = new vscode.Position(result.line, 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      }
+    });
+    context.subscriptions.push(openCommand);
+
+    const hoverProvider = vscode.languages.registerHoverProvider(
+      { scheme: 'telescope-search' },
+      {
+        provideHover(document, position) {
+          const result = lineToResultMap.get(position.line);
+          if (!result) return;
+          return new vscode.Hover(
+            `🔎 Open [${path.basename(result.filePath)}:${result.line + 1}](${vscode.Uri.file(result.filePath)})`
+          );
+        }
+      }
+    );
+    context.subscriptions.push(hoverProvider);
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.openCodelensViewFromPicker', async () => {
+      if (lastQuickPick) {
+        lastQuickPick.hide();
+        await showCodeLensView();
+      }
+    })
+  );
+
   const disposable = vscode.commands.registerCommand('telescopeLikeSearch.start', async () => {
     workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!workspaceFolder) {
@@ -22,14 +119,11 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const quickPick = vscode.window.createQuickPick<SearchResult>();
+    lastQuickPick = quickPick;
+
     quickPick.placeholder = 'Search content with ripgrep...';
     quickPick.matchOnDescription = true;
-    quickPick.buttons = [
-      {
-        iconPath: new vscode.ThemeIcon('output'),
-        tooltip: 'View search results options'
-      }
-    ];
+    quickPick.busy = false;
 
     let currentProcess: ReturnType<typeof spawn> | null = null;
 
@@ -57,153 +151,60 @@ export function activate(context: vscode.ExtensionContext) {
         workspaceFolder!
       ], { cwd: workspaceFolder });
 
-      if (currentProcess.stdout) {
-        currentProcess.stdout.on('data', (data) => {
-          buffer += data.toString();
-        });
-      }
+      currentProcess.stdout?.on('data', (data) => buffer += data.toString());
 
       currentProcess.on('close', () => {
-        setTimeout(() => {
-          const lines = buffer.split('\n');
-          const results: SearchResult[] = [];
+        const lines = buffer.split('\n');
+        const results: SearchResult[] = [];
 
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
-            if (match) {
-              const [, file, lineNum, text] = match;
-              results.push({
-                label: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
-                description: text.trim(),
-                detail: file,
-                filePath: file,
-                line: parseInt(lineNum, 10) - 1,
-                text: text.trim()
-              });
-            }
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+          if (match) {
+            const [, file, lineNum, text] = match;
+            results.push({
+              label: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
+              description: text.trim(),
+              detail: file,
+              filePath: file,
+              line: parseInt(lineNum, 10) - 1,
+              text: text.trim()
+            });
           }
+        }
 
-          lastSearchResults = results;
+        lastSearchResults = results;
 
-          quickPick.busy = false;
-          quickPick.items = results.length > 0
-            ? results
-            : [{
-              label: 'No matches found',
-              description: '',
-              detail: '',
-              filePath: '',
-              line: -1,
-              text: ''
-            }];
-        }, 0);
+        quickPick.items = results.length > 0
+          ? results
+          : [{
+            label: 'No matches found',
+            description: '',
+            detail: '',
+            filePath: '',
+            line: -1,
+            text: ''
+          }];
+        quickPick.busy = false;
       });
     };
 
-    const debouncedSearch = debounce((query: string) => {
-      runRipgrep(query);
-    }, 150);
-
+    const debouncedSearch = debounce(runRipgrep, 150);
     quickPick.onDidChangeValue(debouncedSearch);
 
-    quickPick.onDidTriggerButton(async () => {
-      const selected = await vscode.window.showQuickPick([
-        { label: '🔍 Show CodeLens View (Grouped)', value: 'codelens' },
-        { label: '❌ Cancel', value: 'cancel' }
-      ], { placeHolder: 'Select result view mode' });
-
-      if (!selected || selected.value === 'cancel') return;
-
-      if (selected.value === 'codelens') {
-        const grouped: Record<string, SearchResult[]> = {};
-        for (const res of lastSearchResults) {
-          if (!grouped[res.filePath]) grouped[res.filePath] = [];
-          grouped[res.filePath].push(res);
-        }
-
-        const lines: string[] = [];
-        const lensMap: { line: number, result: SearchResult }[] = [];
-
-        for (const [file, results] of Object.entries(grouped)) {
-          lines.push(`📁 ${file}`);
-          for (const res of results) {
-            const lineNum = lines.length;
-            lensMap.push({ line: lineNum, result: res });
-            lines.push(`   → Line ${res.line + 1}: ${res.text}`);
-
-            try {
-              const doc = await vscode.workspace.openTextDocument(res.filePath);
-              const start = Math.max(0, res.line - 1);
-              const end = Math.min(doc.lineCount, res.line + 2);
-              const context = doc.getText(new vscode.Range(start, 0, end, 0)).split('\n');
-              for (const ctxLine of context) {
-                lines.push(`      ${ctxLine}`);
-              }
-              lines.push('');
-            } catch (e) {
-              lines.push('      [Unable to preview context]');
-              lines.push('');
-            }
-          }
-          lines.push('');
-        }
-
-        const virtualUri = vscode.Uri.parse('telescope-search:/results');
-        const content = lines.join('\n');
-
-        const provider = new (class implements vscode.TextDocumentContentProvider {
-          provideTextDocumentContent() {
-            return content;
-          }
-        })();
-
-        const codeLensProvider = new GroupedCodeLensProvider(lensMap);
-        context.subscriptions.push(
-          vscode.workspace.registerTextDocumentContentProvider('telescope-search', provider),
-          vscode.languages.registerCodeLensProvider({ scheme: 'telescope-search' }, codeLensProvider)
-        );
-
-        const doc = await vscode.workspace.openTextDocument(virtualUri);
-        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-
-        const lineToResultMap = new Map<number, SearchResult>();
-        for (const item of lensMap) lineToResultMap.set(item.line, item.result);
-
-        // Add command to open selected result
-        const openCommand = vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
-          const editor = vscode.window.activeTextEditor;
-          if (!editor || editor.document.uri.toString() !== virtualUri.toString()) return;
-
-          const line = editor.selection.active.line;
-          const result = lineToResultMap.get(line);
-          if (result) {
-            const doc = await vscode.workspace.openTextDocument(result.filePath);
-            const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-            const pos = new vscode.Position(result.line, 0);
-            editor.selection = new vscode.Selection(pos, pos);
-            editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-          }
-        });
-        context.subscriptions.push(openCommand);
-
-        // Add hover provider
-        const hoverProvider = vscode.languages.registerHoverProvider(
-          { scheme: 'telescope-search' },
-          {
-            provideHover(document, position) {
-              const result = lineToResultMap.get(position.line);
-              if (!result) return;
-              return new vscode.Hover(
-                `🔎 Open [${path.basename(result.filePath)}:${result.line + 1}](${vscode.Uri.file(result.filePath)})`
-              );
-            }
-          }
-        );
-        context.subscriptions.push(hoverProvider);
+    quickPick.onDidAccept(async () => {
+      const selected = quickPick.selectedItems[0];
+      if (selected && selected.line >= 0) {
+        const doc = await vscode.workspace.openTextDocument(selected.filePath);
+        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        const pos = new vscode.Position(selected.line, 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
       }
+      quickPick.hide();
     });
 
+    quickPick.onDidHide(() => quickPick.dispose());
     quickPick.show();
   });
 
