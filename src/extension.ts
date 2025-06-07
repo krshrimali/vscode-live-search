@@ -16,7 +16,6 @@ const PREVIEW_LINE_CONTEXT = 2;
 export function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
-  // Command: Open selected line from result view
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
       const editor = vscode.window.activeTextEditor;
@@ -39,7 +38,6 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Command: Trigger CodeLens view from picker
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.openCodelensViewFromPicker', async () => {
       if (lastQuickPick) {
@@ -49,7 +47,6 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Main command: start fuzzy search
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.start', async () => {
       workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -116,14 +113,7 @@ export function activate(context: vscode.ExtensionContext) {
 
           quickPick.items = results.length > 0
             ? results
-            : [{
-              label: 'No matches found',
-              description: '',
-              detail: '',
-              filePath: '',
-              line: -1,
-              text: ''
-            }];
+            : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
           quickPick.busy = false;
         });
       };
@@ -183,7 +173,6 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   }
 
   const content = lines.join('\n');
-
   const uri = vscode.Uri.parse('telescope-results:/results');
 
   const provider = new (class implements vscode.TextDocumentContentProvider {
@@ -198,12 +187,44 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.languages.registerCodeLensProvider({ scheme: 'telescope-results' }, new GroupedCodeLensProvider(lensMap)),
     vscode.languages.registerHoverProvider({ scheme: 'telescope-results' }, {
-      provideHover(document, position) {
-        const result = lensMap.find(r => r.line === position.line)?.result;
+      async provideHover(document, position) {
+        const lineText = document.lineAt(position.line).text;
+        const match = lineText.match(/Line (\d+): (.+)/);
+        if (!match) return;
+        const lineNumber = parseInt(match[1], 10) - 1;
+        const matchedText = match[2].trim();
+        const result = lastSearchResults.find(r => r.line === lineNumber && r.text === matchedText);
         if (!result) return;
-        return new vscode.Hover(
-          `🔎 Open [${path.basename(result.filePath)}:${result.line + 1}](${vscode.Uri.file(result.filePath)})`
-        );
+        try {
+          const doc = await vscode.workspace.openTextDocument(result.filePath);
+          const contextLine = doc.lineAt(result.line).text;
+          return new vscode.Hover(
+            new vscode.MarkdownString(
+              `**Preview from 📄 ${path.basename(result.filePath)}:${result.line + 1}**\n\n\`${contextLine.trim()}\``
+            )
+          );
+        } catch {
+          return new vscode.Hover('⚠️ Unable to load preview');
+        }
+      }
+    }),
+    vscode.languages.registerFoldingRangeProvider({ scheme: 'telescope-results' }, {
+      provideFoldingRanges(document) {
+        const ranges: vscode.FoldingRange[] = [];
+        for (let i = 0; i < document.lineCount; i++) {
+          const line = document.lineAt(i).text;
+          if (line.startsWith('📁 ')) {
+            const start = i;
+            let end = i + 1;
+            while (end < document.lineCount && !document.lineAt(end).text.startsWith('📁 ')) {
+              end++;
+            }
+            if (end - start > 1) {
+              ranges.push(new vscode.FoldingRange(start, end - 1));
+            }
+          }
+        }
+        return ranges;
       }
     })
   );
@@ -212,12 +233,12 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
 }
 
-export function deactivate() {}
+export function deactivate() { }
 
 class GroupedCodeLensProvider implements vscode.CodeLensProvider {
-  constructor(private lensData: { line: number, result: SearchResult }[]) {}
+  constructor(private lensData: { line: number, result: SearchResult }[]) { }
 
-  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+  provideCodeLenses(): vscode.CodeLens[] {
     return this.lensData.map(({ line, result }) => {
       const range = new vscode.Range(line, 0, line, 0);
       return new vscode.CodeLens(range, {

@@ -2,7 +2,7 @@
   "name": "live-search",
   "displayName": "Live Search",
   "description": "Live fuzzy content search with preview using ripgrep",
-  "version": "1.4.0",
+  "version": "1.4.3",
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -21,9 +21,9 @@
         "when": "inputFocus && inQuickOpen"
       },
       {
+        "key": "ctrl+enter",
         "command": "telescopeLikeSearch.openLineFromVirtualDoc",
-        "key": "enter",
-        "when": "editorTextFocus && resourceScheme == telescope-results"
+        "when": "editorTextFocus && resourceScheme == 'telescope-results'"
       }
     ]
   },
