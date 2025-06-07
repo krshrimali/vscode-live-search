@@ -2,7 +2,7 @@
   "name": "live-search",
   "displayName": "Live Search",
   "description": "Live fuzzy content search with preview using ripgrep",
-  "version": "1.3.5",
+  "version": "1.3.8",
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -11,22 +11,14 @@
     "commands": [
       {
         "command": "telescopeLikeSearch.start",
-        "title": "Telescope-Like Search"
-      },
-      {
-        "command": "telescopeLikeSearch.openLineFromVirtualDoc",
-        "title": "Open Result from Telescope View"
-      },
-      {
-        "command": "telescopeLikeSearch.openCodelensViewFromPicker",
-        "title": "Telescope: Open CodeLens View from Picker"
+        "title": "Live Search"
       }
     ],
     "keybindings": [
       {
-        "command": "telescopeLikeSearch.openLineFromVirtualDoc",
         "key": "enter",
-        "when": "editorTextFocus && resourceScheme == telescope-search"
+        "command": "telescopeLikeSearch.openLineFromVirtualDoc",
+        "when": "editorTextFocus && editorLangId == markdown && !editorReadonly"
       },
       {
         "command": "telescopeLikeSearch.openCodelensViewFromPicker",

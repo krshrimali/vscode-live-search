@@ -37,12 +37,12 @@ export function activate(context: vscode.ExtensionContext) {
           const doc = await vscode.workspace.openTextDocument(res.filePath);
           const start = Math.max(0, res.line - 1);
           const end = Math.min(doc.lineCount, res.line + 2);
-          const context = doc.getText(new vscode.Range(start, 0, end, 0)).split('\n');
-          for (const ctxLine of context) {
+          const contextLines = doc.getText(new vscode.Range(start, 0, end, 0)).split('\n');
+          for (const ctxLine of contextLines) {
             lines.push(`      ${ctxLine}`);
           }
           lines.push('');
-        } catch (e) {
+        } catch {
           lines.push('      [Unable to preview context]');
           lines.push('');
         }
@@ -50,48 +50,22 @@ export function activate(context: vscode.ExtensionContext) {
       lines.push('');
     }
 
-    const virtualUri = vscode.Uri.parse('telescope-search:/results');
     const content = lines.join('\n');
+    const fakeFilePath = path.join(workspaceFolder!, '.telescope-results.md');
+    const fakeFileUri = vscode.Uri.file(fakeFilePath).with({ scheme: 'untitled' });
 
-    const provider = new (class implements vscode.TextDocumentContentProvider {
-      provideTextDocumentContent() {
-        return content;
-      }
-    })();
-
-    const codeLensProvider = new GroupedCodeLensProvider(lensMap);
-
-    context.subscriptions.push(
-      vscode.workspace.registerTextDocumentContentProvider('telescope-search', provider),
-      vscode.languages.registerCodeLensProvider({ scheme: 'telescope-search' }, codeLensProvider)
-    );
-
-    const doc = await vscode.workspace.openTextDocument(virtualUri);
+    const doc = await vscode.workspace.openTextDocument({
+      language: 'markdown',
+      content
+    });
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
 
-    const lineToResultMap = new Map<number, SearchResult>();
-    for (const item of lensMap) lineToResultMap.set(item.line, item.result);
-
-    const openCommand = vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor || editor.document.uri.toString() !== virtualUri.toString()) return;
-      const line = editor.selection.active.line;
-      const result = lineToResultMap.get(line);
-      if (result) {
-        const doc = await vscode.workspace.openTextDocument(result.filePath);
-        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-        const pos = new vscode.Position(result.line, 0);
-        editor.selection = new vscode.Selection(pos, pos);
-        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-      }
-    });
-    context.subscriptions.push(openCommand);
-
+    const codeLensProvider = new GroupedCodeLensProvider(lensMap);
     const hoverProvider = vscode.languages.registerHoverProvider(
-      { scheme: 'telescope-search' },
+      { pattern: '**/.telescope-results.md' },
       {
         provideHover(document, position) {
-          const result = lineToResultMap.get(position.line);
+          const result = lensMap.find(r => r.line === position.line)?.result;
           if (!result) return;
           return new vscode.Hover(
             `🔎 Open [${path.basename(result.filePath)}:${result.line + 1}](${vscode.Uri.file(result.filePath)})`
@@ -99,7 +73,26 @@ export function activate(context: vscode.ExtensionContext) {
         }
       }
     );
-    context.subscriptions.push(hoverProvider);
+
+    const openCommand = vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const line = editor.selection.active.line;
+      const result = lensMap.find(r => r.line === line)?.result;
+      if (!result) return;
+
+      const doc = await vscode.workspace.openTextDocument(result.filePath);
+      const editorToShow = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+      const pos = new vscode.Position(result.line, 0);
+      editorToShow.selection = new vscode.Selection(pos, pos);
+      editorToShow.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    });
+
+    context.subscriptions.push(
+      vscode.languages.registerCodeLensProvider({ pattern: '**/.telescope-results.md' }, codeLensProvider),
+      hoverProvider,
+      openCommand
+    );
   };
 
   context.subscriptions.push(
