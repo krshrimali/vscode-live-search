@@ -1,58 +1,92 @@
-# Telescope-Like Search
+# 🔭 Telescope-Like Search for VSCode
 
-A blazing-fast file content search extension for Visual Studio Code — inspired by [Telescope.nvim](https://github.com/nvim-telescope/telescope.nvim).
+A fast and elegant search UI for Visual Studio Code, inspired by Neovim's Telescope plugin.
 
-🔍 Instant results.  
-📂 Inline preview.  
-⚡ Powered by [ripgrep](https://github.com/BurntSushi/ripgrep).  
-🎨 Highlighted matches.  
-🖥️ Vertical split navigation.
-
----
-
-## ✨ Features
-
-- 🔍 **Fuzzy content search** using `ripgrep`
-- 🖼 **Live inline preview** in a webview panel
-- 🎯 **Match highlighting** inside preview
-- 🚀 **Debounced input** for instant results
-- ⌨️ **Keyboard navigation** (Enter to open, Esc to close)
-- 📄 **Respects `.gitignore`** and hidden files
+- ✅ Fuzzy file content search using ripgrep
+- 🧠 Grouped results per file
+- 🖱 Clickable line previews with inline context
+- 👁 Hover to preview content from matching file
+- 📂 Foldable sections for better readability
+- 🧑‍💻 Works with VSCodeVim (`j/k`, `:q`, etc.)
 
 ---
 
-## 📸 Screenshot
+## Screenshot
 
-![image](https://github.com/user-attachments/assets/c0876058-370d-40f8-895f-d4f0aa3ca0e3)
+![image](https://github.com/user-attachments/assets/5d3f4293-86af-4053-831a-6e947ebc9f79)
 
 ---
 
-## ⚙️ Requirements
+## 🚀 Features
 
-- [`ripgrep`](https://github.com/BurntSushi/ripgrep) must be installed and available in your system PATH.
+### 🔍 Live Content Search
+- Triggered by `Live Search` command
+- Uses `ripgrep` under the hood for blazing-fast results
+- Debounced, fuzzy filtering while typing
 
-To install:
+### 📄 Result View (CodeLens Style)
+- Shows matches grouped per file
+- Each match includes a few lines of context
+- Foldable sections per file using built-in folding support
+- Hover over matches to see exact content preview from original file
+- Clickable CodeLens to open exact line in editor
+- Press `Ctrl+Enter` on a line to open its location
 
-```bash
-brew install ripgrep      # macOS
-sudo apt install ripgrep  # Ubuntu/Debian
-choco install ripgrep     # Windows (via Chocolatey)
+### 🧭 Keyboard Support
+- Works seamlessly with VSCodeVim as well.
+- `j/k` to move, `:q` to quit, `/` to search in buffer
+- `Ctrl+Enter` to open the selected line result
+
+---
+
+## 📦 Installation
+
+1. Clone or download this extension
+2. Run `npm install` inside the extension directory
+3. Press `F5` to open a new Extension Development Host
+
+---
+
+## 🧰 Commands
+
+| Command                                     | Description                               |
+|--------------------------------------------|-------------------------------------------|
+| `Live Search`                  | Opens the search QuickPick                |
+
+---
+
+## ⌨️ Keybindings
+
+```json
+{
+  "key": "ctrl+l",
+  "command": "telescopeLikeSearch.openCodelensViewFromPicker",
+  "when": "inputFocus && inQuickOpen"
+},
+{
+  "key": "enter",
+  "command": "telescopeLikeSearch.openLineFromVirtualDoc",
+  "when": "editorTextFocus && resourceScheme == 'telescope-results'"
+}
+```
+
+> Tip: To ensure VSCodeVim doesn't intercept Enter, add this to settings:
+>
+```json
+"vim.handleKeys": {
+  "<Enter>": false
+}
 ```
 
 ---
 
-## 🧪 Usage
+## 🛠 Requirements
 
-1. Open the Command Palette: `Ctrl+Shift+P` / `Cmd+Shift+P`
-2. Run: **"Telescope-Like Search"**
-3. Start typing to search through file contents.
-4. Use arrow keys or Tab to select a result.
-5. Press **Enter** to open the file in a vertical split.
+- `ripgrep` must be installed and available in your PATH
+- VS Code version 1.70+
 
 ---
 
-## 📝 License
+## 📄 License
 
-MIT © 2025 Kushashwa Ravi Shrimali
-
-See [LICENSE.md](LICENSE.md) for details.
+MIT License © 2025
