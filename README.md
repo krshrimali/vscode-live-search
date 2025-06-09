@@ -9,6 +9,8 @@ A fast and elegant search UI for Visual Studio Code, inspired by Neovim's Telesc
 - 📂 Foldable sections for better readability
 - 🧑‍💻 Works with VSCodeVim (`j/k`, `:q`, etc.)
 
+Please make sure to have `ripgrep` installed on your system.
+
 ---
 
 ## Screenshot
@@ -55,7 +57,7 @@ A fast and elegant search UI for Visual Studio Code, inspired by Neovim's Telesc
 
 ---
 
-## ⌨️ Keybindings
+## ⌨️ Default Keybindings
 
 ```json
 {
@@ -64,17 +66,9 @@ A fast and elegant search UI for Visual Studio Code, inspired by Neovim's Telesc
   "when": "inputFocus && inQuickOpen"
 },
 {
-  "key": "enter",
+  "key": "ctrl+enter",
   "command": "telescopeLikeSearch.openLineFromVirtualDoc",
   "when": "editorTextFocus && resourceScheme == 'telescope-results'"
-}
-```
-
-> Tip: To ensure VSCodeVim doesn't intercept Enter, add this to settings:
->
-```json
-"vim.handleKeys": {
-  "<Enter>": false
 }
 ```
 
