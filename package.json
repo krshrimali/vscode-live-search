@@ -2,9 +2,9 @@
   "name": "live-search",
   "displayName": "Live Search",
   "description": "Live fuzzy content search with preview using ripgrep",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "engines": {
-    "vscode": "^1.100.0"
+    "vscode": "^1.85.0"
   },
   "main": "./out/extension.js",
   "contributes": {
