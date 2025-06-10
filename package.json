@@ -33,10 +33,11 @@
   "devDependencies": {
     "@types/lodash.debounce": "^4.0.9",
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.100.0",
+    "@types/vscode": "^1.85.0",
     "typescript": "5.8.3"
   },
   "dependencies": {
+    "@vscode/vsce": "^3.5.0",
     "lodash.debounce": "^4.0.8"
   },
   "repository": {
