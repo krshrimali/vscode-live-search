@@ -12,6 +12,10 @@ interface SearchResult extends vscode.QuickPickItem {
   text: string;
 }
 
+interface FileQuickPickItem extends vscode.QuickPickItem {
+  filePath: string;
+}
+
 let lastSearchResults: SearchResult[] = [];
 let workspaceFolder: string | undefined;
 let lastSearchFolder: string | undefined;
@@ -25,6 +29,7 @@ interface SearchConfig {
   excludePatterns: string[];
   maxFileSize: number;
   recentFolders: string[];
+  maxItemsInPicker: number;
 }
 
 function getSearchConfig(): SearchConfig {
@@ -38,7 +43,8 @@ function getSearchConfig(): SearchConfig {
       '**/.git/**'
     ],
     maxFileSize: config.get('maxFileSize', 1048576),
-    recentFolders: config.get('recentFolders', [])
+    recentFolders: config.get('recentFolders', []),
+    maxItemsInPicker: config.get('maxItemsInPicker', 30)
   };
 }
 
@@ -84,83 +90,81 @@ let outputChannel: vscode.OutputChannel;
 let debugChannel: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem;
 
-async function buildIndexes(root: string, progress?: vscode.Progress<{ message?: string; increment?: number }>) {
-  folderIndex = [];
-  fileIndex = [];
-  await loadGitignorePatterns(root);
-  let folderCount = 0;
-  let fileCount = 0;
-  outputChannel.appendLine(`[Live Search] Indexing started for: ${root}`);
-  async function walk(dir: string) {
-    let entries: [string, vscode.FileType][] = [];
-    try {
-      entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
-    } catch {
-      outputChannel.appendLine(`[Live Search] Failed to read directory: ${dir}`);
-      return;
-    }
-    for (const [name, type] of entries) {
-      const fullPath = path.join(dir, name);
-      const relPath = path.relative(root, fullPath);
-      if (isIgnoredByGitignore(relPath)) continue;
-      if (type === vscode.FileType.Directory) {
-        folderIndex.push(fullPath);
-        folderCount++;
-        if (progress && folderCount % 50 === 0) {
-          progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
-        }
-        // if (folderCount % 50 === 0) {
-        //   outputChannel.appendLine(`[Live Search] Indexed ${folderCount} folders, ${fileCount} files...`);
-        // }
-        debugChannel?.appendLine(`[Live Search Debug] Walking directory: ${fullPath}`);
-        await walk(fullPath);
-      } else if (type === vscode.FileType.File) {
-        fileIndex.push(fullPath);
-        fileCount++;
-        if (progress && fileCount % 200 === 0) {
-          progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
-        }
-        if (fileCount % 200 === 0) {
-          outputChannel.appendLine(`[Live Search] Indexed ${folderCount} folders, ${fileCount} files...`);
-        }
-      }
-    }
-  }
-  await walk(root);
-  if (progress) {
-    progress.report({ message: `Indexing complete: ${folderCount} folders, ${fileCount} files.` });
-  }
-  outputChannel.appendLine(`[Live Search] Indexing complete: ${folderCount} folders, ${fileCount} files.`);
-  if (statusBarItem) {
-    statusBarItem.text = '$(search) Live Search: Ready';
-    statusBarItem.tooltip = 'Click to launch Live Search';
-    statusBarItem.command = 'telescopeLikeSearch.chooseScope';
-  }
-}
-
-function setupIndexWatchers(context: vscode.ExtensionContext, root: string) {
-  // Listen for file/folder create/delete/rename events
-  const watcher = vscode.workspace.createFileSystemWatcher('**/*');
-  const refresh = () => buildIndexes(root);
-  watcher.onDidCreate(refresh, null, context.subscriptions);
-  watcher.onDidDelete(refresh, null, context.subscriptions);
-  watcher.onDidChange(refresh, null, context.subscriptions); // for renames
-  context.subscriptions.push(watcher);
-  // Watch .gitignore
-  const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore');
-  gitignoreWatcher.onDidChange(refresh, null, context.subscriptions);
-  gitignoreWatcher.onDidCreate(refresh, null, context.subscriptions);
-  gitignoreWatcher.onDidDelete(refresh, null, context.subscriptions);
-  context.subscriptions.push(gitignoreWatcher);
-}
-
 // Use the in-memory index for subfolder listing
 async function getSubfolders(folderPath: string): Promise<string[]> {
   // Only return subfolders that are direct or nested children of folderPath
   return folderIndex.filter(f => f.startsWith(folderPath) && f !== folderPath);
 }
 
-async function selectSearchFolder(): Promise<string | undefined> {
+async function getAllSubfolders(rootPath: string): Promise<string[]> {
+  const folders: string[] = [];
+  
+  // Initialize gitignore matcher
+  const ig = ignore();
+  try {
+    const gitignorePath = path.join(rootPath, '.gitignore');
+    const content = await vscode.workspace.fs.readFile(vscode.Uri.file(gitignorePath));
+    const lines = content.toString().split('\n');
+    ig.add(lines);
+  } catch {
+    // No .gitignore, ignore
+  }
+
+  // Add common patterns to ignore
+  ig.add([
+    '**/node_modules/**',
+    '**/.git/**',
+    '**/dist/**',
+    '**/build/**',
+    '**/.vscode/**',
+    '**/.idea/**'
+  ]);
+  
+  async function scanDirectory(dir: string) {
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+      for (const [name, type] of entries) {
+        if (type === vscode.FileType.Directory) {
+          const fullPath = path.join(dir, name);
+          const relativePath = path.relative(rootPath, fullPath);
+          
+          // Skip if the folder matches any ignore patterns
+          if (ig.ignores(relativePath)) {
+            continue;
+          }
+          
+          folders.push(fullPath);
+          await scanDirectory(fullPath);
+        }
+      }
+    } catch (error) {
+      console.error(`Error scanning directory ${dir}:`, error);
+    }
+  }
+
+  await scanDirectory(rootPath);
+  return folders;
+}
+
+interface FolderUsage {
+  freq: number;
+  last: number;
+}
+
+function getFolderUsageMap(context: vscode.ExtensionContext): Record<string, FolderUsage> {
+  return context.workspaceState.get<Record<string, FolderUsage>>('liveSearchFolderUsage', {});
+}
+
+async function updateFolderUsage(context: vscode.ExtensionContext, folder: string) {
+  const usage = getFolderUsageMap(context);
+  const now = Date.now();
+  if (!usage[folder]) usage[folder] = { freq: 0, last: 0 };
+  usage[folder].freq += 1;
+  usage[folder].last = now;
+  await context.workspaceState.update('liveSearchFolderUsage', usage);
+}
+
+async function selectSearchFolder(context: vscode.ExtensionContext): Promise<string | undefined> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     vscode.window.showErrorMessage('No workspace folders open.');
@@ -169,33 +173,79 @@ async function selectSearchFolder(): Promise<string | undefined> {
 
   workspaceFolder = workspaceFolders[0].uri.fsPath;
 
-  // Use getSubfolders to get all subfolders recursively
-  const folders = await getSubfolders(workspaceFolder);
-  // Add the root folder as the first option
-  const items = [
-    {
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading folders...');
+
+  try {
+    // Get all subfolders
+    const folders = await getAllSubfolders(workspaceFolder);
+    
+    // Add the root folder as the first option
+    const rootItem = {
       label: 'Current Folder',
       description: workspaceFolder,
       detail: `📁 ${workspaceFolder}`
-    },
-    ...folders.map(folder => ({
+    };
+
+    // Sort by frecency
+    const maxItems = getSearchConfig().maxItemsInPicker;
+    const sortedItems = getTopFrecencyFolders(context, folders).map(folder => ({
       label: path.relative(workspaceFolder!, folder),
       description: folder,
       detail: `📁 ${folder}`
-    }))
-  ];
+    }));
 
-  const selected = await vscode.window.showQuickPick(items, {
-    placeHolder: 'Select folder to search in',
-    matchOnDescription: true,
-    matchOnDetail: true
-  });
+    const quickPick = vscode.window.createQuickPick();
+    quickPick.items = [rootItem, ...sortedItems.slice(0, maxItems)];
+    quickPick.placeholder = 'Select folder to search in';
+    quickPick.matchOnDescription = true;
+    quickPick.matchOnDetail = true;
 
-  if (selected) {
-    updateRecentFolders(selected.description!);
-    return selected.description;
+    quickPick.onDidChangeValue(async (value) => {
+      if (!value) {
+        quickPick.items = [rootItem, ...sortedItems.slice(0, maxItems)];
+        return;
+      }
+
+      // Search through all folders using relative paths
+      const filtered = folders.filter(folder => {
+        const relativePath = path.relative(workspaceFolder!, folder);
+        return relativePath.toLowerCase().includes(value.toLowerCase());
+      });
+
+      const filteredItems = filtered.map(folder => ({
+        label: path.relative(workspaceFolder!, folder),
+        description: folder,
+        detail: `📁 ${folder}`
+      }));
+
+      quickPick.items = [rootItem, ...filteredItems.slice(0, maxItems)];
+    });
+
+    return new Promise<string | undefined>((resolve) => {
+      let resolved = false;
+      quickPick.onDidAccept(() => {
+        if (resolved) return;
+        resolved = true;
+        const selected = quickPick.selectedItems[0];
+        quickPick.hide();
+        if (selected?.description) {
+          updateFolderUsage(context, selected.description);
+          resolve(selected.description);
+        } else {
+          resolve(undefined);
+        }
+      });
+      quickPick.onDidHide(() => {
+        if (resolved) return;
+        resolved = true;
+        resolve(undefined);
+      });
+      quickPick.show();
+    });
+  } finally {
+    loadingMessage.dispose();
   }
-  return undefined;
 }
 
 async function testFolderSelection() {
@@ -249,10 +299,11 @@ async function updateFileUsage(context: vscode.ExtensionContext, file: string) {
   await context.workspaceState.update('liveSearchFileUsage', usage);
 }
 
-function getTopFrecencyFiles(context: vscode.ExtensionContext, files: string[], limit = 30): string[] {
+function getTopFrecencyFiles(context: vscode.ExtensionContext, files: string[], limit?: number): string[] {
   const usage = getFileUsageMap(context);
   const now = Date.now();
   const recencyWeight = 1 / (1000 * 60 * 60 * 24); // 1 point per day
+  const maxItems = limit || getSearchConfig().maxItemsInPicker;
   return files
     .map(f => {
       const u = usage[f];
@@ -263,11 +314,81 @@ function getTopFrecencyFiles(context: vscode.ExtensionContext, files: string[], 
       return { file: f, score };
     })
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
+    .slice(0, maxItems)
     .map(x => x.file);
 }
 
+function getTopFrecencyFolders(context: vscode.ExtensionContext, folders: string[], limit?: number): string[] {
+  const usage = getFolderUsageMap(context);
+  const now = Date.now();
+  const recencyWeight = 1 / (1000 * 60 * 60 * 24); // 1 point per day
+  const maxItems = limit || getSearchConfig().maxItemsInPicker;
+  return folders
+    .map(f => {
+      const u = usage[f];
+      let score = 0;
+      if (u) {
+        score = u.freq + recencyWeight * (now - u.last);
+      }
+      return { folder: f, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxItems)
+    .map(x => x.folder);
+}
+
 // Use the in-memory index for file picker
+async function getAllFiles(rootPath: string): Promise<string[]> {
+  const files: string[] = [];
+  
+  // Initialize gitignore matcher
+  const ig = ignore();
+  try {
+    const gitignorePath = path.join(rootPath, '.gitignore');
+    const content = await vscode.workspace.fs.readFile(vscode.Uri.file(gitignorePath));
+    const lines = content.toString().split('\n');
+    ig.add(lines);
+  } catch {
+    // No .gitignore, ignore
+  }
+
+  // Add common patterns to ignore
+  ig.add([
+    '**/node_modules/**',
+    '**/.git/**',
+    '**/dist/**',
+    '**/build/**',
+    '**/.vscode/**',
+    '**/.idea/**'
+  ]);
+  
+  async function scanDirectory(dir: string) {
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+      for (const [name, type] of entries) {
+        const fullPath = path.join(dir, name);
+        const relativePath = path.relative(rootPath, fullPath);
+        
+        // Skip if the path matches any ignore patterns
+        if (ig.ignores(relativePath)) {
+          continue;
+        }
+
+        if (type === vscode.FileType.Directory) {
+          await scanDirectory(fullPath);
+        } else if (type === vscode.FileType.File) {
+          files.push(fullPath);
+        }
+      }
+    } catch (error) {
+      console.error(`Error scanning directory ${dir}:`, error);
+    }
+  }
+
+  await scanDirectory(rootPath);
+  return files;
+}
+
 async function selectFileToSearch(context: vscode.ExtensionContext): Promise<string | undefined> {
   outputChannel.appendLine('[Live Search] Opening file picker...');
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -278,75 +399,96 @@ async function selectFileToSearch(context: vscode.ExtensionContext): Promise<str
   }
   workspaceFolder = workspaceFolders[0].uri.fsPath;
 
-  // Use the in-memory file index
-  const files = fileIndex.filter(f => !f.includes('node_modules'));
-  outputChannel.appendLine(`[Live Search] File picker candidate count: ${files.length}`);
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading files...');
 
-  // Helper to build fileItems for a given list of files
-  async function buildFileItems(fileList: string[]) {
-    return Promise.all(fileList.map(async file => {
-      const relativePath = path.relative(workspaceFolder!, file);
-      let preview = '';
-      try {
-        const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
-        const text = content.toString();
-        preview = text.split('\n').slice(0, 3).join('\n');
-      } catch {
-        preview = '[Unable to read file]';
-      }
-      return {
-        label: relativePath,
-        description: file,
-        detail: preview
-      };
-    }));
-  }
+  try {
+    // Get all files
+    const files = await getAllFiles(workspaceFolder);
+    outputChannel.appendLine(`[Live Search] File picker candidate count: ${files.length}`);
 
-  // Show top 30 frecency files initially
-  let fileItems = await buildFileItems(getTopFrecencyFiles(context, files, 30));
-  outputChannel.appendLine(`[Live Search] Showing top ${fileItems.length} files in picker.`);
+    // Helper to build fileItems for a given list of files
+    async function buildFileItems(fileList: string[]): Promise<FileQuickPickItem[]> {
+      return Promise.all(fileList.map(async file => {
+        const relativePath = path.relative(workspaceFolder!, file);
+        const fileName = path.basename(file);
+        const fileDir = path.dirname(relativePath);
+        
+        let preview = '';
+        try {
+          const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
+          const text = content.toString();
+          preview = text.split('\n').slice(0, 3).join('\n');
+        } catch {
+          preview = '[Unable to read file]';
+        }
 
-  const quickPick = vscode.window.createQuickPick();
-  quickPick.items = fileItems;
-  quickPick.placeholder = 'Select file to search in';
-  quickPick.matchOnDescription = true;
-  quickPick.busy = false;
-
-  quickPick.onDidChangeValue(async (value) => {
-    if (!value) {
-      quickPick.items = await buildFileItems(getTopFrecencyFiles(context, files, 30));
-      outputChannel.appendLine('[Live Search] Picker reset to top frecency files.');
-      return;
+        return {
+          label: fileName,
+          description: fileDir === '.' ? '' : fileDir,
+          detail: preview,
+          filePath: file
+        };
+      }));
     }
-    // Filter files by value (case-insensitive substring match)
-    const filtered = files.filter(f => f.toLowerCase().includes(value.toLowerCase()));
-    quickPick.items = await buildFileItems(filtered.slice(0, 30));
-    outputChannel.appendLine(`[Live Search] Picker filtered: ${filtered.length} matches, showing ${Math.min(filtered.length, 30)}.`);
-  });
 
-  return new Promise<string | undefined>((resolve) => {
-    let resolved = false;
-    quickPick.onDidAccept(async () => {
-      if (resolved) return;
-      resolved = true;
-      const selected = quickPick.selectedItems[0];
-      quickPick.hide();
-      if (selected?.description) {
-        await updateFileUsage(context, selected.description);
-        outputChannel.appendLine(`[Live Search] File selected: ${selected.description}`);
-      } else {
-        outputChannel.appendLine('[Live Search] File picker accepted, but no file selected.');
+    // Get top frecency files
+    const maxItems = getSearchConfig().maxItemsInPicker;
+    const topFiles = getTopFrecencyFiles(context, files);
+    let fileItems = await buildFileItems(topFiles);
+    outputChannel.appendLine(`[Live Search] Showing top ${fileItems.length} files in picker.`);
+
+    const quickPick = vscode.window.createQuickPick<FileQuickPickItem>();
+    quickPick.items = fileItems;
+    quickPick.placeholder = 'Select file to search in';
+    quickPick.matchOnDescription = true;
+    quickPick.busy = false;
+
+    quickPick.onDidChangeValue(async (value) => {
+      if (!value) {
+        quickPick.items = await buildFileItems(getTopFrecencyFiles(context, files));
+        outputChannel.appendLine('[Live Search] Picker reset to top frecency files.');
+        return;
       }
-      resolve(selected?.description);
+
+      // Filter files by value (case-insensitive substring match)
+      // Match against both filename and relative path
+      const filtered = files.filter(f => {
+        const relativePath = path.relative(workspaceFolder!, f);
+        return relativePath.toLowerCase().includes(value.toLowerCase());
+      });
+
+      quickPick.items = await buildFileItems(filtered.slice(0, maxItems));
+      outputChannel.appendLine(`[Live Search] Picker filtered: ${filtered.length} matches, showing ${Math.min(filtered.length, maxItems)}.`);
     });
-    quickPick.onDidHide(() => {
-      if (resolved) return;
-      resolved = true;
-      outputChannel.appendLine('[Live Search] File picker closed.');
-      resolve(undefined);
+
+    return new Promise<string | undefined>((resolve) => {
+      let resolved = false;
+      quickPick.onDidAccept(async () => {
+        if (resolved) return;
+        resolved = true;
+        const selected = quickPick.selectedItems[0];
+        quickPick.hide();
+        if (selected?.filePath) {
+          await updateFileUsage(context, selected.filePath);
+          outputChannel.appendLine(`[Live Search] File selected: ${selected.filePath}`);
+          resolve(selected.filePath);
+        } else {
+          outputChannel.appendLine('[Live Search] File picker accepted, but no file selected.');
+          resolve(undefined);
+        }
+      });
+      quickPick.onDidHide(() => {
+        if (resolved) return;
+        resolved = true;
+        outputChannel.appendLine('[Live Search] File picker closed.');
+        resolve(undefined);
+      });
+      quickPick.show();
     });
-    quickPick.show();
-  });
+  } finally {
+    loadingMessage.dispose();
+  }
 }
 
 async function getCurrentFileFolder(): Promise<string | undefined> {
@@ -482,36 +624,6 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
 }
 
-// Persistent cache helpers
-async function saveIndexToCache(context: vscode.ExtensionContext, folderIndex: string[], fileIndex: string[]) {
-  const cachePath = path.join(context.globalStorageUri.fsPath, 'live-search-index.json');
-  const data = JSON.stringify({ folderIndex, fileIndex, timestamp: Date.now() });
-  await vscode.workspace.fs.createDirectory(context.globalStorageUri);
-  await vscode.workspace.fs.writeFile(vscode.Uri.file(cachePath), Buffer.from(data, 'utf8'));
-  outputChannel.appendLine(`[Live Search] Index saved to cache: ${cachePath}`);
-}
-
-async function loadIndexFromCache(context: vscode.ExtensionContext): Promise<{ folderIndex: string[], fileIndex: string[], timestamp: number } | null> {
-  const cachePath = path.join(context.globalStorageUri.fsPath, 'live-search-index.json');
-  try {
-    const data = await vscode.workspace.fs.readFile(vscode.Uri.file(cachePath));
-    const parsed = JSON.parse(data.toString());
-    outputChannel.appendLine(`[Live Search] Index loaded from cache: ${cachePath}`);
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-// Multi-threaded indexing (scaffold)
-async function buildIndexesParallel(root: string, progress?: vscode.Progress<{ message?: string; increment?: number }>): Promise<{ folderIndex: string[], fileIndex: string[] }> {
-  // TODO: Implement worker_threads logic here
-  // For now, fallback to single-threaded
-  outputChannel.appendLine('[Live Search] Multi-threaded indexing not yet implemented, falling back to single-threaded.');
-  await buildIndexes(root, progress);
-  return { folderIndex, fileIndex };
-}
-
 // Helper to launch search-in-file QuickPick for a given file
 async function launchSearchInFileQuickPick(selectedFile: string) {
   outputChannel.appendLine(`[Live Search] Launching search-in-file picker for: ${selectedFile}`);
@@ -628,8 +740,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Status bar icon
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
-  statusBarItem.tooltip = 'Indexing workspace for Live Search...';
+  statusBarItem.text = '$(search) Live Search: Ready';
+  statusBarItem.tooltip = 'Click to launch Live Search';
+  statusBarItem.command = 'telescopeLikeSearch.chooseScope';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
@@ -637,42 +750,28 @@ export async function activate(context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (workspaceFolders && workspaceFolders.length > 0) {
     workspaceFolder = workspaceFolders[0].uri.fsPath;
-    // Try to load from cache first
-    const cached = await loadIndexFromCache(context);
-    let useCache = false;
-    if (cached && Date.now() - cached.timestamp < 1000 * 60 * 60) { // 1 hour freshness
-      folderIndex = cached.folderIndex;
-      fileIndex = cached.fileIndex;
-      useCache = true;
-      outputChannel.appendLine('[Live Search] Using cached index.');
-      statusBarItem.text = '$(search) Live Search: Ready (cached)';
-      statusBarItem.tooltip = 'Click to launch Live Search';
-      statusBarItem.command = 'telescopeLikeSearch.chooseScope';
-    }
-    if (!useCache) {
-      vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Window,
-          title: 'Live Search: Indexing workspace...',
-          cancellable: false
-        },
-        async (progress) => {
-          statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
-          statusBarItem.tooltip = 'Indexing workspace for Live Search...';
-          statusBarItem.command = undefined;
-          const { folderIndex: fIdx, fileIndex: fiIdx } = await buildIndexesParallel(workspaceFolder!, progress);
-          folderIndex = fIdx;
-          fileIndex = fiIdx;
-          await saveIndexToCache(context, folderIndex, fileIndex);
-        }
-      ).then(() => {
-        vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
-        statusBarItem.text = '$(search) Live Search: Ready';
-        statusBarItem.tooltip = 'Click to launch Live Search';
-        statusBarItem.command = 'telescopeLikeSearch.chooseScope';
-      });
-    }
-    setupIndexWatchers(context, workspaceFolder);
+    // Remove indexing logic
+    // vscode.window.withProgress(
+    //   {
+    //     location: vscode.ProgressLocation.Window,
+    //     title: 'Live Search: Indexing workspace...',
+    //     cancellable: false
+    //   },
+    //   async (progress) => {
+    //     statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
+    //     statusBarItem.tooltip = 'Indexing workspace for Live Search...';
+    //     statusBarItem.command = undefined;
+    //     const { folderIndex: fIdx, fileIndex: fiIdx } = await buildIndexesParallel(workspaceFolder!, progress);
+    //     folderIndex = fIdx;
+    //     fileIndex = fiIdx;
+    //   }
+    // ).then(() => {
+    //   vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
+    //   statusBarItem.text = '$(search) Live Search: Ready';
+    //   statusBarItem.tooltip = 'Click to launch Live Search';
+    //   statusBarItem.command = 'telescopeLikeSearch.chooseScope';
+    // });
+    // setupIndexWatchers(context, workspaceFolder);
   }
 
   context.subscriptions.push(
@@ -719,7 +818,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.startInSelectedFolder', async () => {
-      const selectedFolder = await selectSearchFolder();
+      const selectedFolder = await selectSearchFolder(context);
       if (!selectedFolder) return;
 
       workspaceFolder = selectedFolder;
@@ -777,7 +876,7 @@ export async function activate(context: vscode.ExtensionContext) {
       ];
 
       quickPick.onDidTriggerButton(async () => {
-        const selectedFolder = await selectSearchFolder();
+        const selectedFolder = await selectSearchFolder(context);
         if (selectedFolder) {
           workspaceFolder = selectedFolder;
           lastSearchFolder = selectedFolder;
