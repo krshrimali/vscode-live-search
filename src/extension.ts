@@ -11,147 +11,190 @@ interface SearchResult extends vscode.QuickPickItem {
 
 let lastSearchResults: SearchResult[] = [];
 let workspaceFolder: string | undefined;
+let lastSearchFolder: string | undefined;
 const PREVIEW_LINE_CONTEXT = 2;
+const MAX_SEARCH_RESULTS = 300;
+const SEARCH_DEBOUNCE_MS = 300;
 
-export function activate(context: vscode.ExtensionContext) {
-  let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
+// Configuration for search scope
+interface SearchConfig {
+  includePatterns: string[];
+  excludePatterns: string[];
+  maxFileSize: number;
+  recentFolders: string[];
+}
 
-  context.subscriptions.push(
-    vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor || editor.document.uri.scheme !== 'telescope-results') return;
+function getSearchConfig(): SearchConfig {
+  const config = vscode.workspace.getConfiguration('telescopeLikeSearch');
+  
+  return {
+    includePatterns: ['**/*'], // Include all files by default
+    excludePatterns: [
+      ...config.get('excludePatterns', []),
+      '**/node_modules/**',
+      '**/.git/**'
+    ],
+    maxFileSize: config.get('maxFileSize', 1048576),
+    recentFolders: config.get('recentFolders', [])
+  };
+}
 
-      const line = editor.selection.active.line;
-      const text = editor.document.lineAt(line).text;
+function updateRecentFolders(folder: string) {
+  const config = vscode.workspace.getConfiguration('telescopeLikeSearch');
+  const recentFolders = config.get('recentFolders', []) as string[];
+  const updatedFolders = [folder, ...recentFolders.filter(f => f !== folder)].slice(0, 5);
+  config.update('recentFolders', updatedFolders, true);
+}
 
-      const result = lastSearchResults.find(r =>
-        text.includes(`Line ${r.line + 1}:`) && text.includes(r.text)
-      );
+async function isDirectory(uri: vscode.Uri): Promise<boolean> {
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    return (stat.type & vscode.FileType.Directory) !== 0;
+  } catch {
+    return false;
+  }
+}
 
-      if (result) {
-        const doc = await vscode.workspace.openTextDocument(result.filePath);
-        const shownEditor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-        const pos = new vscode.Position(result.line, 0);
-        shownEditor.selection = new vscode.Selection(pos, pos);
-        shownEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-      }
-    })
+async function selectSearchFolder(): Promise<string | undefined> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    vscode.window.showErrorMessage('No workspace folders open.');
+    return undefined;
+  }
+
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+  // Use getSubfolders to get all subfolders recursively
+  const folders = await getSubfolders(workspaceFolder);
+  // Add the root folder as the first option
+  const items = [
+    {
+      label: 'Current Folder',
+      description: workspaceFolder,
+      detail: `📁 ${workspaceFolder}`
+    },
+    ...folders.map(folder => ({
+      label: path.relative(workspaceFolder!, folder),
+      description: folder,
+      detail: `📁 ${folder}`
+    }))
+  ];
+
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select folder to search in',
+    matchOnDescription: true,
+    matchOnDetail: true
+  });
+
+  if (selected) {
+    updateRecentFolders(selected.description!);
+    return selected.description;
+  }
+  return undefined;
+}
+
+async function getSubfolders(folderPath: string): Promise<string[]> {
+  const folders: string[] = [];
+  const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(folderPath));
+  
+  for (const [name, type] of entries) {
+    if (type === vscode.FileType.Directory) {
+      const fullPath = path.join(folderPath, name);
+      folders.push(fullPath);
+      // Recursively get subfolders
+      const subfolders = await getSubfolders(fullPath);
+      folders.push(...subfolders);
+    }
+  }
+  
+  return folders;
+}
+
+async function testFolderSelection() {
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('No workspace folder is open');
+    return;
+  }
+
+  // At this point we know workspaceFolder is defined
+  const rootFolder = workspaceFolder;
+  const folders = await getSubfolders(rootFolder);
+  console.log('Available folders:', folders);
+  
+  const items = folders.map(folder => {
+    const relativePath = path.relative(rootFolder, folder);
+    return {
+      label: relativePath,
+      description: folder,
+      detail: `📁 ${folder}`
+    };
+  });
+  
+  const selected = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select a folder to search in',
+    matchOnDescription: true,
+    matchOnDetail: true
+  });
+  
+  if (selected) {
+    console.log('Selected folder:', selected.description);
+    vscode.window.showInformationMessage(`Selected folder: ${selected.description}`);
+  }
+}
+
+async function selectFileToSearch(): Promise<string | undefined> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    vscode.window.showErrorMessage('No workspace folders open.');
+    return undefined;
+  }
+
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+  // Get all files in the workspace
+  const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**');
+  
+  // Create quick pick items with file previews
+  const fileItems = await Promise.all(files.map(async file => {
+    const relativePath = path.relative(workspaceFolder!, file.fsPath);
+    let preview = '';
+    
+    try {
+      const content = await vscode.workspace.fs.readFile(file);
+      const text = content.toString();
+      // Get first few lines for preview
+      preview = text.split('\n').slice(0, 3).join('\n');
+    } catch {
+      preview = '[Unable to read file]';
+    }
+
+    return {
+      label: relativePath,
+      description: file.fsPath,
+      detail: preview
+    };
+  }));
+
+  const selected = await vscode.window.showQuickPick(
+    fileItems,
+    {
+      placeHolder: 'Select file to search in',
+      matchOnDescription: true
+    }
   );
 
-  context.subscriptions.push(
-    vscode.commands.registerCommand('telescopeLikeSearch.openCodelensViewFromPicker', async () => {
-      if (lastQuickPick) {
-        lastQuickPick.hide();
-        await showCodeLensView(context);
-      }
-    })
-  );
+  return selected?.description;
+}
 
-  context.subscriptions.push(
-    vscode.commands.registerCommand('telescopeLikeSearch.start', async () => {
-      workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!workspaceFolder) {
-        vscode.window.showErrorMessage('No workspace folder open.');
-        return;
-      }
+async function getCurrentFileFolder(): Promise<string | undefined> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage('No active editor.');
+    return undefined;
+  }
 
-      const quickPick = vscode.window.createQuickPick<SearchResult>();
-      lastQuickPick = quickPick;
-
-      quickPick.placeholder = 'Search content with ripgrep...';
-      quickPick.matchOnDescription = true;
-      quickPick.busy = false;
-
-      let currentProcess: ReturnType<typeof spawn> | null = null;
-
-      const runRipgrep = (query: string) => {
-        if (currentProcess) currentProcess.kill();
-        if (!query || query.length < 2) {
-          quickPick.items = [];
-          quickPick.busy = false;
-          return;
-        }
-
-        quickPick.busy = true;
-        let buffer = '';
-
-        currentProcess = spawn('rg', [
-          '--vimgrep',
-          '--smart-case',
-          '--hidden',
-          '--no-heading',
-          '--color', 'never',
-          '--max-count', '300',
-          '--text',
-          query,
-          workspaceFolder!
-        ], { cwd: workspaceFolder });
-
-        currentProcess.stdout?.on('data', (data) => buffer += data.toString());
-
-        currentProcess.on('close', () => {
-          const lines = buffer.split('\n');
-          const results: SearchResult[] = [];
-
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
-            if (match) {
-              const [, file, lineNum, text] = match;
-              results.push({
-                label: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
-                description: text.trim(),
-                detail: file,
-                filePath: file,
-                line: parseInt(lineNum, 10) - 1,
-                text: text.trim()
-              });
-            }
-          }
-
-          // Heuristic sorting by relevance
-          results.sort((a, b) => {
-            const score = (res: SearchResult): number => {
-              const fileDepth = res.filePath.split(path.sep).length;
-              const startMatch = res.text.toLowerCase().startsWith(query.toLowerCase()) ? 100 : 0;
-              const substringMatch = res.text.toLowerCase().includes(query.toLowerCase()) ? 50 : 0;
-              const wordCount =  (res.text.toLowerCase().match(new RegExp(query.toLowerCase(), 'g')) || []).length;
-              const lineScore = Math.max(30 - res.line, 0);
-              const filePathScore = Math.max(20 - fileDepth, 0);
-              return startMatch + substringMatch + wordCount * 10 + lineScore + filePathScore;
-            };
-
-            return score(b) - score(a);  // descending!
-          });
-
-          lastSearchResults = results;
-
-          quickPick.items = results.length > 0
-            ? results
-            : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
-          quickPick.busy = false;
-        });
-      };
-
-      const debouncedSearch = debounce(runRipgrep, 150);
-      quickPick.onDidChangeValue(debouncedSearch);
-
-      quickPick.onDidAccept(async () => {
-        const selected = quickPick.selectedItems[0];
-        if (selected && selected.line >= 0) {
-          const doc = await vscode.workspace.openTextDocument(selected.filePath);
-          const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-          const pos = new vscode.Position(selected.line, 0);
-          editor.selection = new vscode.Selection(pos, pos);
-          editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-        }
-        quickPick.hide();
-      });
-
-      quickPick.onDidHide(() => quickPick.dispose());
-      quickPick.show();
-    })
-  );
+  const filePath = editor.document.uri.fsPath;
+  return path.dirname(filePath);
 }
 
 async function showCodeLensView(context: vscode.ExtensionContext) {
@@ -164,12 +207,15 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   const lines: string[] = [];
   const lensMap: { line: number, result: SearchResult }[] = [];
 
-  for (const [file, results] of Object.entries(grouped)) {
-    lines.push(`📁 ${file}`);
+  // Process files in parallel with a limit
+  const processFile = async (file: string, results: SearchResult[]) => {
+    const fileLines: string[] = [];
+    fileLines.push(`📁 ${file}`);
+    
     for (const res of results) {
-      const lineNum = lines.length;
+      const lineNum = lines.length + fileLines.length;
       lensMap.push({ line: lineNum, result: res });
-      lines.push(`   → Line ${res.line + 1}: ${res.text}`);
+      fileLines.push(`   → Line ${res.line + 1}: ${res.text}`);
 
       try {
         const doc = await vscode.workspace.openTextDocument(res.filePath);
@@ -177,14 +223,39 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
         const end = Math.min(doc.lineCount, res.line + 2);
         const contextLines = doc.getText(new vscode.Range(start, 0, end, 0)).split('\n');
         for (const ctxLine of contextLines) {
-          lines.push(`      ${ctxLine}`);
+          fileLines.push(`      ${ctxLine}`);
         }
-        lines.push('');
+        fileLines.push('');
       } catch {
-        lines.push('      [Unable to preview context]', '');
+        fileLines.push('      [Unable to preview context]', '');
       }
     }
-    lines.push('');
+    fileLines.push('');
+    return fileLines;
+  };
+
+  // Process files in batches to avoid overwhelming the system
+  const batchSize = 10; // Increased batch size for better performance
+  const files = Object.entries(grouped);
+  
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading search results...');
+  
+  try {
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(([file, results]) => processFile(file, results))
+      );
+      lines.push(...batchResults.flat());
+      
+      // Update progress
+      const progress = Math.min(100, Math.round((i + batchSize) / files.length * 100));
+      loadingMessage.dispose();
+      vscode.window.setStatusBarMessage(`Loading search results... ${progress}%`);
+    }
+  } finally {
+    loadingMessage.dispose();
   }
 
   const content = lines.join('\n');
@@ -248,6 +319,357 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
 }
 
+export function activate(context: vscode.ExtensionContext) {
+  let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
+
+  // Initialize workspace folder
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (workspaceFolders && workspaceFolders.length > 0) {
+    workspaceFolder = workspaceFolders[0].uri.fsPath;
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== 'telescope-results') return;
+
+      const line = editor.selection.active.line;
+      const text = editor.document.lineAt(line).text;
+
+      const result = lastSearchResults.find(r =>
+        text.includes(`Line ${r.line + 1}:`) && text.includes(r.text)
+      );
+
+      if (result) {
+        const doc = await vscode.workspace.openTextDocument(result.filePath);
+        const shownEditor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        const pos = new vscode.Position(result.line, 0);
+        shownEditor.selection = new vscode.Selection(pos, pos);
+        shownEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.openCodelensViewFromPicker', async () => {
+      if (lastQuickPick) {
+        lastQuickPick.hide();
+        await showCodeLensView(context);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.startInSubfolder', async () => {
+      const currentFolder = await getCurrentFileFolder();
+      if (!currentFolder) return;
+
+      workspaceFolder = currentFolder;
+      lastSearchFolder = currentFolder;
+      await vscode.commands.executeCommand('telescopeLikeSearch.start');
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.startInSelectedFolder', async () => {
+      const selectedFolder = await selectSearchFolder();
+      if (!selectedFolder) return;
+
+      workspaceFolder = selectedFolder;
+      lastSearchFolder = selectedFolder;
+      await vscode.commands.executeCommand('telescopeLikeSearch.start');
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.startInFile', async () => {
+      const selectedFile = await selectFileToSearch();
+      if (!selectedFile) return;
+
+      const quickPick = vscode.window.createQuickPick<SearchResult>();
+      lastQuickPick = quickPick;
+
+      quickPick.placeholder = `Search content in ${path.basename(selectedFile)}...`;
+      quickPick.matchOnDescription = true;
+      quickPick.busy = false;
+
+      let currentProcess: ReturnType<typeof spawn> | null = null;
+
+      const runRipgrep = (query: string) => {
+        if (currentProcess) currentProcess.kill();
+        if (!query || query.length < 2) {
+          quickPick.items = [];
+          quickPick.busy = false;
+          return;
+        }
+
+        quickPick.busy = true;
+        let buffer = '';
+
+        const ripgrepArgs = [
+          '--vimgrep',
+          '--smart-case',
+          '--no-heading',
+          '--color', 'never',
+          '--text',
+          query,
+          selectedFile
+        ];
+
+        currentProcess = spawn('rg', ripgrepArgs, { 
+          cwd: workspaceFolder
+        });
+
+        if (currentProcess.stdout) {
+          currentProcess.stdout.on('data', (data) => buffer += data.toString());
+        }
+
+        currentProcess.on('close', () => {
+          const lines = buffer.split('\n');
+          const results: SearchResult[] = [];
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+            if (match) {
+              const [, file, lineNum, text] = match;
+              results.push({
+                label: `Line ${lineNum}`,
+                description: text.trim(),
+                detail: file,
+                filePath: file,
+                line: parseInt(lineNum, 10) - 1,
+                text: text.trim()
+              });
+            }
+          }
+
+          // Sort by line number
+          results.sort((a, b) => a.line - b.line);
+
+          lastSearchResults = results;
+
+          quickPick.items = results.length > 0
+            ? results
+            : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
+          quickPick.busy = false;
+        });
+      };
+
+      const debouncedSearch = debounce(runRipgrep, SEARCH_DEBOUNCE_MS);
+      quickPick.onDidChangeValue(debouncedSearch);
+
+      quickPick.onDidAccept(async () => {
+        const selected = quickPick.selectedItems[0];
+        if (selected && selected.line >= 0) {
+          const doc = await vscode.workspace.openTextDocument(selected.filePath);
+          const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+          const pos = new vscode.Position(selected.line, 0);
+          editor.selection = new vscode.Selection(pos, pos);
+          editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+        }
+        quickPick.hide();
+      });
+
+      quickPick.onDidHide(() => {
+        quickPick.dispose();
+        workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      });
+      
+      quickPick.show();
+    })
+  );
+
+  // Add test command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.testFolderSelection', async () => {
+      await testFolderSelection();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.start', async () => {
+      if (!workspaceFolder) {
+        workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceFolder) {
+          vscode.window.showErrorMessage('No workspace folder open.');
+          return;
+        }
+      }
+
+      const quickPick = vscode.window.createQuickPick<SearchResult>();
+      lastQuickPick = quickPick;
+
+      quickPick.placeholder = `Search content in ${path.relative(workspaceFolder, lastSearchFolder || workspaceFolder)}...`;
+      quickPick.matchOnDescription = true;
+      quickPick.busy = false;
+
+      // Add folder selection button
+      quickPick.buttons = [
+        {
+          iconPath: new vscode.ThemeIcon('folder'),
+          tooltip: 'Change search folder'
+        }
+      ];
+
+      quickPick.onDidTriggerButton(async () => {
+        const selectedFolder = await selectSearchFolder();
+        if (selectedFolder) {
+          workspaceFolder = selectedFolder;
+          lastSearchFolder = selectedFolder;
+          quickPick.placeholder = `Search content in ${path.relative(workspaceFolder, selectedFolder)}...`;
+          if (quickPick.value) {
+            runRipgrep(quickPick.value);
+          }
+        }
+      });
+
+      let currentProcess: ReturnType<typeof spawn> | null = null;
+
+      const runRipgrep = (query: string) => {
+        if (currentProcess) currentProcess.kill();
+        if (!query || query.length < 2) {
+          quickPick.items = [];
+          quickPick.busy = false;
+          return;
+        }
+
+        quickPick.busy = true;
+        let buffer = '';
+
+        const searchConfig = getSearchConfig();
+        const ripgrepArgs = [
+          '--vimgrep',
+          '--smart-case',
+          '--hidden',
+          '--no-heading',
+          '--color', 'never',
+          '--max-count', MAX_SEARCH_RESULTS.toString(),
+          '--text',
+          '--max-filesize', searchConfig.maxFileSize.toString(),
+          query,
+          workspaceFolder!
+        ];
+
+        // Add include/exclude patterns
+        searchConfig.includePatterns.forEach(pattern => {
+          ripgrepArgs.push('--glob', pattern);
+        });
+        searchConfig.excludePatterns.forEach(pattern => {
+          ripgrepArgs.push('--glob', `!${pattern}`);
+        });
+
+        currentProcess = spawn('rg', ripgrepArgs, { 
+          cwd: workspaceFolder
+        });
+
+        if (currentProcess.stdout) {
+          currentProcess.stdout.on('data', (data) => buffer += data.toString());
+        }
+
+        currentProcess.on('close', () => {
+          const lines = buffer.split('\n');
+          const results: SearchResult[] = [];
+          const processedFiles = new Set<string>();
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+            if (match) {
+              const [, file, lineNum, text] = match;
+              if (processedFiles.has(file)) continue;
+              processedFiles.add(file);
+
+              results.push({
+                label: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
+                description: text.trim(),
+                detail: file,
+                filePath: file,
+                line: parseInt(lineNum, 10) - 1,
+                text: text.trim()
+              });
+            }
+          }
+
+          // Heuristic sorting by relevance
+          results.sort((a, b) => {
+            const score = (res: SearchResult): number => {
+              const fileDepth = res.filePath.split(path.sep).length;
+              const startMatch = res.text.toLowerCase().startsWith(query.toLowerCase()) ? 100 : 0;
+              const substringMatch = res.text.toLowerCase().includes(query.toLowerCase()) ? 50 : 0;
+              const wordCount =  (res.text.toLowerCase().match(new RegExp(query.toLowerCase(), 'g')) || []).length;
+              const lineScore = Math.max(30 - res.line, 0);
+              const filePathScore = Math.max(20 - fileDepth, 0);
+              return startMatch + substringMatch + wordCount * 10 + lineScore + filePathScore;
+            };
+
+            return score(b) - score(a);
+          });
+
+          lastSearchResults = results;
+
+          quickPick.items = results.length > 0
+            ? results
+            : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
+          quickPick.busy = false;
+        });
+      };
+
+      const debouncedSearch = debounce(runRipgrep, SEARCH_DEBOUNCE_MS);
+      quickPick.onDidChangeValue(debouncedSearch);
+
+      quickPick.onDidAccept(async () => {
+        const selected = quickPick.selectedItems[0];
+        if (selected && selected.line >= 0) {
+          const doc = await vscode.workspace.openTextDocument(selected.filePath);
+          const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+          const pos = new vscode.Position(selected.line, 0);
+          editor.selection = new vscode.Selection(pos, pos);
+          editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+        }
+        quickPick.hide();
+      });
+
+      quickPick.onDidHide(() => {
+        quickPick.dispose();
+        // Reset workspace folder to root after search is done
+        workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      });
+      
+      quickPick.show();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.chooseScope', async () => {
+      const options = [
+        {
+          label: 'Search in whole workspace',
+          description: 'Search across all files in the workspace',
+          command: 'telescopeLikeSearch.start'
+        },
+        {
+          label: 'Select folder to search in',
+          description: 'Choose a folder to limit the search',
+          command: 'telescopeLikeSearch.startInSelectedFolder'
+        },
+        {
+          label: 'Select file to search in',
+          description: 'Choose a file to limit the search',
+          command: 'telescopeLikeSearch.startInFile'
+        }
+      ];
+      const selected = await vscode.window.showQuickPick(options, {
+        placeHolder: 'Choose search scope',
+        matchOnDescription: true
+      });
+      if (selected) {
+        await vscode.commands.executeCommand(selected.command);
+      }
+    })
+  );
+}
+
 export function deactivate() { }
 
 class GroupedCodeLensProvider implements vscode.CodeLensProvider {
@@ -265,5 +687,28 @@ class GroupedCodeLensProvider implements vscode.CodeLensProvider {
         ]
       });
     });
+  }
+}
+
+function getGitignorePatterns(): string[] {
+  try {
+    const gitignorePath = path.join(workspaceFolder!, '.gitignore');
+    const gitignoreContent = vscode.workspace.fs.readFile(vscode.Uri.file(gitignorePath));
+    const patterns = gitignoreContent.toString().split('\n')
+      .map((line: string) => line.trim())
+      .filter((line: string) => line && !line.startsWith('#'))
+      .map((line: string) => {
+        // Convert .gitignore patterns to glob patterns
+        if (line.startsWith('/')) {
+          return `**${line}/**`;
+        }
+        if (line.endsWith('/')) {
+          return `**/${line}**`;
+        }
+        return `**/${line}`;
+      });
+    return patterns;
+  } catch {
+    return [];
   }
 }

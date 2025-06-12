@@ -2,7 +2,7 @@
   "name": "live-search",
   "displayName": "Live Search",
   "description": "Live fuzzy content search with preview using ripgrep",
-  "version": "1.4.7",
+  "version": "2.0.0",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,6 +12,22 @@
       {
         "command": "telescopeLikeSearch.start",
         "title": "Live Search"
+      },
+      {
+        "command": "telescopeLikeSearch.startInSubfolder",
+        "title": "Live Search: Search in Current Folder"
+      },
+      {
+        "command": "telescopeLikeSearch.startInSelectedFolder",
+        "title": "Live Search: Select Folder to Search"
+      },
+      {
+        "command": "telescopeLikeSearch.startInFile",
+        "title": "Live Search: Search in Selected File"
+      },
+      {
+        "command": "telescopeLikeSearch.chooseScope",
+        "title": "Live Search: Choose Search Scope"
       }
     ],
     "keybindings": [
@@ -24,8 +40,49 @@
         "key": "ctrl+enter",
         "command": "telescopeLikeSearch.openLineFromVirtualDoc",
         "when": "editorTextFocus && resourceScheme == 'telescope-results'"
+      },
+      {
+        "key": "ctrl+shift+f",
+        "command": "telescopeLikeSearch.startInSubfolder",
+        "when": "editorTextFocus"
+      },
+      {
+        "key": "ctrl+shift+s",
+        "command": "telescopeLikeSearch.startInSelectedFolder",
+        "when": "editorTextFocus"
+      },
+      {
+        "key": "ctrl+shift+i",
+        "command": "telescopeLikeSearch.startInFile",
+        "when": "editorTextFocus"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Live Search",
+      "properties": {
+        "telescopeLikeSearch.includePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["**/*"],
+          "description": "Glob patterns for files to include in search"
+        },
+        "telescopeLikeSearch.excludePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["**/node_modules/**", "**/dist/**", "**/.git/**"],
+          "description": "Glob patterns for files to exclude from search"
+        },
+        "telescopeLikeSearch.maxFileSize": {
+          "type": "number",
+          "default": 1048576,
+          "description": "Maximum file size in bytes to include in search (default: 1MB)"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "tsc -p ./"
