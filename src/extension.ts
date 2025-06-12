@@ -221,26 +221,47 @@ async function selectSearchFolder(context: vscode.ExtensionContext): Promise<str
     const folders: string[] = [];
     try {
       const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
-      for (const [name, type] of entries) {
-        if (type === vscode.FileType.Directory) {
-          const fullPath = path.join(dir, name);
-          const relativePath = path.relative(workspaceFolder!, fullPath);
-          
-          // Skip if the folder matches any ignore patterns
-          if (ig.ignores(relativePath)) {
-            continue;
-          }
+      
+      // Process entries in parallel chunks
+      const CHUNK_SIZE = 10;
+      for (let i = 0; i < entries.length; i += CHUNK_SIZE) {
+        const chunk = entries.slice(i, i + CHUNK_SIZE);
+        const chunkResults = await Promise.all(
+          chunk.map(async ([name, type]) => {
+            if (type !== vscode.FileType.Directory) return null;
+            
+            const fullPath = path.join(dir, name);
+            const relativePath = path.relative(workspaceFolder!, fullPath);
+            
+            // Skip if the folder matches any ignore patterns
+            if (ig.ignores(relativePath)) {
+              return null;
+            }
 
-          // Only add if it matches the search term
-          if (!searchTerm || relativePath.toLowerCase().includes(searchTerm.toLowerCase())) {
-            folders.push(fullPath);
-          }
+            // Only add if it matches the search term
+            if (!searchTerm || relativePath.toLowerCase().includes(searchTerm.toLowerCase())) {
+              return fullPath;
+            }
 
-          // Only recurse if we haven't hit the folder limit
-          if (folders.length < MAX_FOLDERS) {
-            const subFolders = await scanFolders(fullPath, depth + 1, searchTerm);
-            folders.push(...subFolders);
-          }
+            // Only recurse if we haven't hit the folder limit
+            if (folders.length < MAX_FOLDERS) {
+              const subFolders = await scanFolders(fullPath, depth + 1, searchTerm);
+              return subFolders;
+            }
+            return null;
+          })
+        );
+
+        // Flatten and filter results
+        const validResults = chunkResults
+          .filter((result): result is string | string[] => result !== null)
+          .flat();
+        
+        folders.push(...validResults);
+        
+        // Break if we've hit the limit
+        if (folders.length >= MAX_FOLDERS) {
+          break;
         }
       }
     } catch (error) {
@@ -463,20 +484,10 @@ async function selectFileToSearch(context: vscode.ExtensionContext): Promise<str
         const relativePath = path.relative(workspaceFolder!, file);
         const fileName = path.basename(file);
         const fileDir = path.dirname(relativePath);
-        
-        let preview = '';
-        try {
-          const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
-          const text = content.toString();
-          preview = text.split('\n').slice(0, 3).join('\n');
-        } catch {
-          preview = '[Unable to read file]';
-        }
 
         return {
           label: fileName,
           description: fileDir === '.' ? '' : fileDir,
-          detail: preview,
           filePath: file
         };
       }));
@@ -684,9 +695,15 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
   quickPick.busy = false;
 
   let currentProcess: ReturnType<typeof spawn> | null = null;
+  let searchTimeout: NodeJS.Timeout | null = null;
 
   const runRipgrep = (query: string) => {
-    if (currentProcess) currentProcess.kill();
+    if (currentProcess) {
+      currentProcess.kill();
+      currentProcess = null;
+    }
+    if (searchTimeout) clearTimeout(searchTimeout);
+    
     if (!query || query.length < 2) {
       quickPick.items = [];
       quickPick.busy = false;
@@ -698,59 +715,109 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
     let buffer = '';
     outputChannel.appendLine(`[Live Search] Running ripgrep in file: ${selectedFile} | Query: "${query}"`);
 
-    const ripgrepArgs = [
-      '--vimgrep',
-      '--smart-case',
-      '--no-heading',
-      '--color', 'never',
-      '--text',
-      query,
-      selectedFile
-    ];
+    // Split the file into chunks for parallel processing
+    const CHUNK_SIZE = 1000; // Number of lines per chunk
+    const chunks: string[] = [];
+    let currentChunk = '';
+    let lineCount = 0;
 
-    currentProcess = spawn('rg', ripgrepArgs, { 
-      cwd: workspaceFolder
+    const processChunk = async (chunk: string, startLine: number): Promise<SearchResult[]> => {
+      const ripgrepArgs = [
+        '--vimgrep',
+        '--smart-case',
+        '--no-heading',
+        '--color', 'never',
+        '--text',
+        '--line-number',
+        '--with-filename',
+        query,
+        '-'
+      ];
+
+      return new Promise((resolve) => {
+        const process: ReturnType<typeof spawn> = spawn('rg', ripgrepArgs, { 
+          cwd: workspaceFolder
+        });
+
+        let chunkBuffer = '';
+        if (process.stdout) {
+          process.stdout.on('data', (data) => chunkBuffer += data.toString());
+        }
+
+        process.on('close', () => {
+          const lines = chunkBuffer.split('\n');
+          const results: SearchResult[] = [];
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+            if (match) {
+              const [, file, lineNum, text] = match;
+              results.push({
+                label: `Line ${lineNum}`,
+                description: text.trim(),
+                filePath: file,
+                line: parseInt(lineNum, 10) - 1,
+                text: text.trim()
+              });
+            }
+          }
+          resolve(results);
+        });
+
+        process.stdin?.write(chunk);
+        process.stdin?.end();
+      });
+    };
+
+    // Read file in chunks and process them
+    const fileStream = fs.createReadStream(selectedFile, { encoding: 'utf8' });
+    const rl = require('readline').createInterface({
+      input: fileStream,
+      crlfDelay: Infinity
     });
 
-    if (currentProcess.stdout) {
-      currentProcess.stdout.on('data', (data) => buffer += data.toString());
-    }
+    rl.on('line', (line: string) => {
+      currentChunk += line + '\n';
+      lineCount++;
+      
+      if (lineCount >= CHUNK_SIZE) {
+        chunks.push(currentChunk);
+        currentChunk = '';
+        lineCount = 0;
+      }
+    });
 
-    currentProcess.on('close', () => {
-      const lines = buffer.split('\n');
-      const results: SearchResult[] = [];
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
-        if (match) {
-          const [, file, lineNum, text] = match;
-          results.push({
-            label: `Line ${lineNum}`,
-            description: text.trim(),
-            detail: file,
-            filePath: file,
-            line: parseInt(lineNum, 10) - 1,
-            text: text.trim()
-          });
-        }
+    rl.on('close', async () => {
+      if (currentChunk) {
+        chunks.push(currentChunk);
       }
 
-      // Sort by line number
-      results.sort((a, b) => a.line - b.line);
+      // Process chunks in parallel
+      const chunkResults = await Promise.all(
+        chunks.map((chunk, index) => 
+          processChunk(chunk, index * CHUNK_SIZE)
+        )
+      );
 
+      // Combine and sort results
+      const results = chunkResults.flat().sort((a, b) => a.line - b.line);
       lastSearchResults = results;
       outputChannel.appendLine(`[Live Search] Search complete. Results: ${results.length}`);
 
       quickPick.items = results.length > 0
         ? results
-        : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
+        : [{ label: 'No matches found', description: '', filePath: '', line: -1, text: '' }];
       quickPick.busy = false;
     });
 
-    currentProcess.on('error', (err) => {
-      outputChannel.appendLine(`[Live Search] Ripgrep process error: ${err}`);
-    });
+    // Set a timeout to show results even if some chunks are still processing
+    searchTimeout = setTimeout(() => {
+      if (quickPick.busy) {
+        quickPick.busy = false;
+        outputChannel.appendLine('[Live Search] Search timed out, showing partial results.');
+      }
+    }, 5000); // 5 second timeout
   };
 
   const debouncedSearch = debounce(runRipgrep, SEARCH_DEBOUNCE_MS);
