@@ -81,6 +81,7 @@ function isIgnoredByGitignore(relPath: string): boolean {
 }
 
 let outputChannel: vscode.OutputChannel;
+let debugChannel: vscode.OutputChannel;
 let statusBarItem: vscode.StatusBarItem;
 
 async function buildIndexes(root: string, progress?: vscode.Progress<{ message?: string; increment?: number }>) {
@@ -108,9 +109,10 @@ async function buildIndexes(root: string, progress?: vscode.Progress<{ message?:
         if (progress && folderCount % 50 === 0) {
           progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
         }
-        if (folderCount % 50 === 0) {
-          outputChannel.appendLine(`[Live Search] Indexed ${folderCount} folders, ${fileCount} files...`);
-        }
+        // if (folderCount % 50 === 0) {
+        //   outputChannel.appendLine(`[Live Search] Indexed ${folderCount} folders, ${fileCount} files...`);
+        // }
+        debugChannel?.appendLine(`[Live Search Debug] Walking directory: ${fullPath}`);
         await walk(fullPath);
       } else if (type === vscode.FileType.File) {
         fileIndex.push(fullPath);
@@ -621,6 +623,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Output channel for logging
   outputChannel = vscode.window.createOutputChannel('Live Search');
+  debugChannel = vscode.window.createOutputChannel('Live Search Debug');
   outputChannel.appendLine('[Live Search] Extension activated.');
 
   // Status bar icon
