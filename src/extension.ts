@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import debounce from 'lodash.debounce';
+import * as minimatch from 'minimatch';
 
 interface SearchResult extends vscode.QuickPickItem {
   filePath: string;
@@ -55,6 +56,94 @@ async function isDirectory(uri: vscode.Uri): Promise<boolean> {
   }
 }
 
+// In-memory indexes
+let folderIndex: string[] = [];
+let fileIndex: string[] = [];
+
+let gitignorePatterns: string[] = [];
+let gitignoreMatchers: minimatch.Minimatch[] = [];
+
+async function loadGitignorePatterns(root: string) {
+  gitignorePatterns = [];
+  gitignoreMatchers = [];
+  try {
+    const gitignorePath = path.join(root, '.gitignore');
+    const content = await vscode.workspace.fs.readFile(vscode.Uri.file(gitignorePath));
+    const lines = content.toString().split('\n');
+    gitignorePatterns = lines
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#'));
+    gitignoreMatchers = gitignorePatterns.map(pattern => new minimatch.Minimatch(pattern, { dot: true, matchBase: true }));
+  } catch {
+    // No .gitignore, ignore
+  }
+}
+
+function isIgnoredByGitignore(relPath: string): boolean {
+  return gitignoreMatchers.some(matcher => matcher.match(relPath));
+}
+
+async function buildIndexes(root: string, progress?: vscode.Progress<{ message?: string; increment?: number }>) {
+  folderIndex = [];
+  fileIndex = [];
+  await loadGitignorePatterns(root);
+  let folderCount = 0;
+  let fileCount = 0;
+  async function walk(dir: string) {
+    let entries: [string, vscode.FileType][] = [];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+    } catch {
+      return;
+    }
+    for (const [name, type] of entries) {
+      const fullPath = path.join(dir, name);
+      const relPath = path.relative(root, fullPath);
+      if (isIgnoredByGitignore(relPath)) continue;
+      if (type === vscode.FileType.Directory) {
+        folderIndex.push(fullPath);
+        folderCount++;
+        if (progress && folderCount % 50 === 0) {
+          progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
+        }
+        await walk(fullPath);
+      } else if (type === vscode.FileType.File) {
+        fileIndex.push(fullPath);
+        fileCount++;
+        if (progress && fileCount % 200 === 0) {
+          progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
+        }
+      }
+    }
+  }
+  await walk(root);
+  if (progress) {
+    progress.report({ message: `Indexing complete: ${folderCount} folders, ${fileCount} files.` });
+  }
+}
+
+function setupIndexWatchers(context: vscode.ExtensionContext, root: string) {
+  // Listen for file/folder create/delete/rename events
+  const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+  const refresh = () => buildIndexes(root);
+  watcher.onDidCreate(refresh, null, context.subscriptions);
+  watcher.onDidDelete(refresh, null, context.subscriptions);
+  watcher.onDidChange(refresh, null, context.subscriptions); // for renames
+  context.subscriptions.push(watcher);
+  // Watch .gitignore
+  const gitignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.gitignore');
+  gitignoreWatcher.onDidChange(refresh, null, context.subscriptions);
+  gitignoreWatcher.onDidCreate(refresh, null, context.subscriptions);
+  gitignoreWatcher.onDidDelete(refresh, null, context.subscriptions);
+  context.subscriptions.push(gitignoreWatcher);
+}
+
+// Use the in-memory index for subfolder listing
+async function getSubfolders(folderPath: string): Promise<string[]> {
+  // Only return subfolders that are direct or nested children of folderPath
+  return folderIndex.filter(f => f.startsWith(folderPath) && f !== folderPath);
+}
+
 async function selectSearchFolder(): Promise<string | undefined> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -93,23 +182,6 @@ async function selectSearchFolder(): Promise<string | undefined> {
   return undefined;
 }
 
-async function getSubfolders(folderPath: string): Promise<string[]> {
-  const folders: string[] = [];
-  const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(folderPath));
-  
-  for (const [name, type] of entries) {
-    if (type === vscode.FileType.Directory) {
-      const fullPath = path.join(folderPath, name);
-      folders.push(fullPath);
-      // Recursively get subfolders
-      const subfolders = await getSubfolders(fullPath);
-      folders.push(...subfolders);
-    }
-  }
-  
-  return folders;
-}
-
 async function testFolderSelection() {
   if (!workspaceFolder) {
     vscode.window.showErrorMessage('No workspace folder is open');
@@ -142,35 +214,30 @@ async function testFolderSelection() {
   }
 }
 
+// Use the in-memory index for file picker
 async function selectFileToSearch(): Promise<string | undefined> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     vscode.window.showErrorMessage('No workspace folders open.');
     return undefined;
   }
-
   workspaceFolder = workspaceFolders[0].uri.fsPath;
 
-  // Get all files in the workspace
-  const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**');
-  
-  // Create quick pick items with file previews
+  // Use the in-memory file index
+  const files = fileIndex.filter(f => !f.includes('node_modules'));
   const fileItems = await Promise.all(files.map(async file => {
-    const relativePath = path.relative(workspaceFolder!, file.fsPath);
+    const relativePath = path.relative(workspaceFolder!, file);
     let preview = '';
-    
     try {
-      const content = await vscode.workspace.fs.readFile(file);
+      const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
       const text = content.toString();
-      // Get first few lines for preview
       preview = text.split('\n').slice(0, 3).join('\n');
     } catch {
       preview = '[Unable to read file]';
     }
-
     return {
       label: relativePath,
-      description: file.fsPath,
+      description: file,
       detail: preview
     };
   }));
@@ -182,7 +249,6 @@ async function selectFileToSearch(): Promise<string | undefined> {
       matchOnDescription: true
     }
   );
-
   return selected?.description;
 }
 
@@ -326,6 +392,19 @@ export function activate(context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (workspaceFolders && workspaceFolders.length > 0) {
     workspaceFolder = workspaceFolders[0].uri.fsPath;
+    vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Window,
+        title: 'Live Search: Indexing workspace...',
+        cancellable: false
+      },
+      async (progress) => {
+        await buildIndexes(workspaceFolder!, progress);
+      }
+    ).then(() => {
+      vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
+    });
+    setupIndexWatchers(context, workspaceFolder);
   }
 
   context.subscriptions.push(

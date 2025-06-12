@@ -2,7 +2,7 @@
   "name": "live-search",
   "displayName": "Live Search",
   "description": "Live fuzzy content search with preview using ripgrep",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -65,7 +65,9 @@
           "items": {
             "type": "string"
           },
-          "default": ["**/*"],
+          "default": [
+            "**/*"
+          ],
           "description": "Glob patterns for files to include in search"
         },
         "telescopeLikeSearch.excludePatterns": {
@@ -73,7 +75,11 @@
           "items": {
             "type": "string"
           },
-          "default": ["**/node_modules/**", "**/dist/**", "**/.git/**"],
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/.git/**"
+          ],
           "description": "Glob patterns for files to exclude from search"
         },
         "telescopeLikeSearch.maxFileSize": {
@@ -94,8 +100,10 @@
     "typescript": "5.8.3"
   },
   "dependencies": {
+    "@types/minimatch": "^5.1.2",
     "@vscode/vsce": "^3.5.0",
-    "lodash.debounce": "^4.0.8"
+    "lodash.debounce": "^4.0.8",
+    "minimatch": "^10.0.2"
   },
   "repository": {
     "type": "git",
