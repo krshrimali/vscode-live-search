@@ -3,6 +3,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import debounce from 'lodash.debounce';
 import * as minimatch from 'minimatch';
+import ignore from 'ignore';
 
 interface SearchResult extends vscode.QuickPickItem {
   filePath: string;
@@ -60,28 +61,26 @@ async function isDirectory(uri: vscode.Uri): Promise<boolean> {
 let folderIndex: string[] = [];
 let fileIndex: string[] = [];
 
-let gitignorePatterns: string[] = [];
-let gitignoreMatchers: minimatch.Minimatch[] = [];
+let gitignoreMatcher: ReturnType<typeof ignore> | null = null;
 
 async function loadGitignorePatterns(root: string) {
-  gitignorePatterns = [];
-  gitignoreMatchers = [];
+  gitignoreMatcher = ignore();
   try {
     const gitignorePath = path.join(root, '.gitignore');
     const content = await vscode.workspace.fs.readFile(vscode.Uri.file(gitignorePath));
     const lines = content.toString().split('\n');
-    gitignorePatterns = lines
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#'));
-    gitignoreMatchers = gitignorePatterns.map(pattern => new minimatch.Minimatch(pattern, { dot: true, matchBase: true }));
+    gitignoreMatcher.add(lines);
   } catch {
     // No .gitignore, ignore
   }
 }
 
 function isIgnoredByGitignore(relPath: string): boolean {
-  return gitignoreMatchers.some(matcher => matcher.match(relPath));
+  return gitignoreMatcher ? gitignoreMatcher.ignores(relPath) : false;
 }
+
+let outputChannel: vscode.OutputChannel;
+let statusBarItem: vscode.StatusBarItem;
 
 async function buildIndexes(root: string, progress?: vscode.Progress<{ message?: string; increment?: number }>) {
   folderIndex = [];
@@ -89,11 +88,13 @@ async function buildIndexes(root: string, progress?: vscode.Progress<{ message?:
   await loadGitignorePatterns(root);
   let folderCount = 0;
   let fileCount = 0;
+  outputChannel.appendLine(`[Live Search] Indexing started for: ${root}`);
   async function walk(dir: string) {
     let entries: [string, vscode.FileType][] = [];
     try {
       entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
     } catch {
+      outputChannel.appendLine(`[Live Search] Failed to read directory: ${dir}`);
       return;
     }
     for (const [name, type] of entries) {
@@ -106,6 +107,9 @@ async function buildIndexes(root: string, progress?: vscode.Progress<{ message?:
         if (progress && folderCount % 50 === 0) {
           progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
         }
+        if (folderCount % 50 === 0) {
+          outputChannel.appendLine(`[Live Search] Indexed ${folderCount} folders, ${fileCount} files...`);
+        }
         await walk(fullPath);
       } else if (type === vscode.FileType.File) {
         fileIndex.push(fullPath);
@@ -113,12 +117,21 @@ async function buildIndexes(root: string, progress?: vscode.Progress<{ message?:
         if (progress && fileCount % 200 === 0) {
           progress.report({ message: `Indexed ${folderCount} folders, ${fileCount} files...` });
         }
+        if (fileCount % 200 === 0) {
+          outputChannel.appendLine(`[Live Search] Indexed ${folderCount} folders, ${fileCount} files...`);
+        }
       }
     }
   }
   await walk(root);
   if (progress) {
     progress.report({ message: `Indexing complete: ${folderCount} folders, ${fileCount} files.` });
+  }
+  outputChannel.appendLine(`[Live Search] Indexing complete: ${folderCount} folders, ${fileCount} files.`);
+  if (statusBarItem) {
+    statusBarItem.text = '$(search) Live Search: Ready';
+    statusBarItem.tooltip = 'Click to launch Live Search';
+    statusBarItem.command = 'telescopeLikeSearch.chooseScope';
   }
 }
 
@@ -388,6 +401,17 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
 export function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
+  // Output channel for logging
+  outputChannel = vscode.window.createOutputChannel('Live Search');
+  outputChannel.appendLine('[Live Search] Extension activated.');
+
+  // Status bar icon
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
+  statusBarItem.tooltip = 'Indexing workspace for Live Search...';
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
+
   // Initialize workspace folder
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (workspaceFolders && workspaceFolders.length > 0) {
@@ -399,10 +423,16 @@ export function activate(context: vscode.ExtensionContext) {
         cancellable: false
       },
       async (progress) => {
+        statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
+        statusBarItem.tooltip = 'Indexing workspace for Live Search...';
+        statusBarItem.command = undefined;
         await buildIndexes(workspaceFolder!, progress);
       }
     ).then(() => {
       vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
+      statusBarItem.text = '$(search) Live Search: Ready';
+      statusBarItem.tooltip = 'Click to launch Live Search';
+      statusBarItem.command = 'telescopeLikeSearch.chooseScope';
     });
     setupIndexWatchers(context, workspaceFolder);
   }
