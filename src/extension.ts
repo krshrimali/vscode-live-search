@@ -172,80 +172,130 @@ async function selectSearchFolder(context: vscode.ExtensionContext): Promise<str
   }
 
   workspaceFolder = workspaceFolders[0].uri.fsPath;
+  if (!workspaceFolder) {
+    vscode.window.showErrorMessage('Invalid workspace folder path.');
+    return undefined;
+  }
 
-  // Show loading indicator
-  const loadingMessage = vscode.window.setStatusBarMessage('Loading folders...');
+  // Add the root folder as the first option
+  const rootItem = {
+    label: 'Current Folder',
+    description: workspaceFolder,
+    detail: `📁 ${workspaceFolder}`
+  };
 
+  const quickPick = vscode.window.createQuickPick();
+  quickPick.items = [rootItem];
+  quickPick.placeholder = 'Type to search folders...';
+  quickPick.matchOnDescription = true;
+  quickPick.matchOnDetail = true;
+
+  // Initialize gitignore matcher
+  const ig = ignore();
   try {
-    // Get all subfolders
-    const folders = await getAllSubfolders(workspaceFolder);
+    const gitignorePath = path.join(workspaceFolder, '.gitignore');
+    const content = await vscode.workspace.fs.readFile(vscode.Uri.file(gitignorePath));
+    const lines = content.toString().split('\n');
+    ig.add(lines);
+  } catch {
+    // No .gitignore, ignore
+  }
+
+  // Add common patterns to ignore
+  ig.add([
+    '**/node_modules/**',
+    '**/.git/**',
+    '**/dist/**',
+    '**/build/**',
+    '**/.vscode/**',
+    '**/.idea/**'
+  ]);
+
+  let isSearching = false;
+  const MAX_DEPTH = 3; // Limit folder depth to prevent excessive scanning
+  const MAX_FOLDERS = 1000; // Limit total folders to prevent overwhelming the picker
+
+  async function scanFolders(dir: string, depth: number, searchTerm: string): Promise<string[]> {
+    if (depth > MAX_DEPTH) return [];
     
-    // Add the root folder as the first option
-    const rootItem = {
-      label: 'Current Folder',
-      description: workspaceFolder,
-      detail: `📁 ${workspaceFolder}`
-    };
+    const folders: string[] = [];
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dir));
+      for (const [name, type] of entries) {
+        if (type === vscode.FileType.Directory) {
+          const fullPath = path.join(dir, name);
+          const relativePath = path.relative(workspaceFolder!, fullPath);
+          
+          // Skip if the folder matches any ignore patterns
+          if (ig.ignores(relativePath)) {
+            continue;
+          }
 
-    // Sort by frecency
-    const maxItems = getSearchConfig().maxItemsInPicker;
-    const sortedItems = getTopFrecencyFolders(context, folders).map(folder => ({
-      label: path.relative(workspaceFolder!, folder),
-      description: folder,
-      detail: `📁 ${folder}`
-    }));
+          // Only add if it matches the search term
+          if (!searchTerm || relativePath.toLowerCase().includes(searchTerm.toLowerCase())) {
+            folders.push(fullPath);
+          }
 
-    const quickPick = vscode.window.createQuickPick();
-    quickPick.items = [rootItem, ...sortedItems.slice(0, maxItems)];
-    quickPick.placeholder = 'Select folder to search in';
-    quickPick.matchOnDescription = true;
-    quickPick.matchOnDetail = true;
+          // Only recurse if we haven't hit the folder limit
+          if (folders.length < MAX_FOLDERS) {
+            const subFolders = await scanFolders(fullPath, depth + 1, searchTerm);
+            folders.push(...subFolders);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Error scanning directory ${dir}:`, error);
+    }
+    return folders.slice(0, MAX_FOLDERS);
+  }
 
-    quickPick.onDidChangeValue(async (value) => {
+  quickPick.onDidChangeValue(async (value) => {
+    if (isSearching) return;
+    isSearching = true;
+    quickPick.busy = true;
+
+    try {
       if (!value) {
-        quickPick.items = [rootItem, ...sortedItems.slice(0, maxItems)];
+        quickPick.items = [rootItem];
         return;
       }
 
-      // Search through all folders using relative paths
-      const filtered = folders.filter(folder => {
-        const relativePath = path.relative(workspaceFolder!, folder);
-        return relativePath.toLowerCase().includes(value.toLowerCase());
-      });
-
-      const filteredItems = filtered.map(folder => ({
+      const folders = await scanFolders(workspaceFolder!, 0, value);
+      
+      const items = folders.map(folder => ({
         label: path.relative(workspaceFolder!, folder),
         description: folder,
         detail: `📁 ${folder}`
       }));
 
-      quickPick.items = [rootItem, ...filteredItems.slice(0, maxItems)];
-    });
+      quickPick.items = [rootItem, ...items];
+    } finally {
+      quickPick.busy = false;
+      isSearching = false;
+    }
+  });
 
-    return new Promise<string | undefined>((resolve) => {
-      let resolved = false;
-      quickPick.onDidAccept(() => {
-        if (resolved) return;
-        resolved = true;
-        const selected = quickPick.selectedItems[0];
-        quickPick.hide();
-        if (selected?.description) {
-          updateFolderUsage(context, selected.description);
-          resolve(selected.description);
-        } else {
-          resolve(undefined);
-        }
-      });
-      quickPick.onDidHide(() => {
-        if (resolved) return;
-        resolved = true;
+  return new Promise<string | undefined>((resolve) => {
+    let resolved = false;
+    quickPick.onDidAccept(() => {
+      if (resolved) return;
+      resolved = true;
+      const selected = quickPick.selectedItems[0];
+      quickPick.hide();
+      if (selected?.description) {
+        updateFolderUsage(context, selected.description);
+        resolve(selected.description);
+      } else {
         resolve(undefined);
-      });
-      quickPick.show();
+      }
     });
-  } finally {
-    loadingMessage.dispose();
-  }
+    quickPick.onDidHide(() => {
+      if (resolved) return;
+      resolved = true;
+      resolve(undefined);
+    });
+    quickPick.show();
+  });
 }
 
 async function testFolderSelection() {
