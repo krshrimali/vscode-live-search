@@ -4,6 +4,7 @@ import * as path from 'path';
 import debounce from 'lodash.debounce';
 import * as minimatch from 'minimatch';
 import ignore from 'ignore';
+import * as fs from 'fs';
 
 interface SearchResult extends vscode.QuickPickItem {
   filePath: string;
@@ -227,42 +228,123 @@ async function testFolderSelection() {
   }
 }
 
+// Frecency helpers for file picker
+interface FileUsage {
+  freq: number;
+  last: number;
+}
+
+function getFileUsageMap(context: vscode.ExtensionContext): Record<string, FileUsage> {
+  return context.workspaceState.get<Record<string, FileUsage>>('liveSearchFileUsage', {});
+}
+
+async function updateFileUsage(context: vscode.ExtensionContext, file: string) {
+  const usage = getFileUsageMap(context);
+  const now = Date.now();
+  if (!usage[file]) usage[file] = { freq: 0, last: 0 };
+  usage[file].freq += 1;
+  usage[file].last = now;
+  await context.workspaceState.update('liveSearchFileUsage', usage);
+}
+
+function getTopFrecencyFiles(context: vscode.ExtensionContext, files: string[], limit = 30): string[] {
+  const usage = getFileUsageMap(context);
+  const now = Date.now();
+  const recencyWeight = 1 / (1000 * 60 * 60 * 24); // 1 point per day
+  return files
+    .map(f => {
+      const u = usage[f];
+      let score = 0;
+      if (u) {
+        score = u.freq + recencyWeight * (now - u.last);
+      }
+      return { file: f, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(x => x.file);
+}
+
 // Use the in-memory index for file picker
-async function selectFileToSearch(): Promise<string | undefined> {
+async function selectFileToSearch(context: vscode.ExtensionContext): Promise<string | undefined> {
+  outputChannel.appendLine('[Live Search] Opening file picker...');
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     vscode.window.showErrorMessage('No workspace folders open.');
+    outputChannel.appendLine('[Live Search] No workspace folders open.');
     return undefined;
   }
   workspaceFolder = workspaceFolders[0].uri.fsPath;
 
   // Use the in-memory file index
   const files = fileIndex.filter(f => !f.includes('node_modules'));
-  const fileItems = await Promise.all(files.map(async file => {
-    const relativePath = path.relative(workspaceFolder!, file);
-    let preview = '';
-    try {
-      const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
-      const text = content.toString();
-      preview = text.split('\n').slice(0, 3).join('\n');
-    } catch {
-      preview = '[Unable to read file]';
-    }
-    return {
-      label: relativePath,
-      description: file,
-      detail: preview
-    };
-  }));
+  outputChannel.appendLine(`[Live Search] File picker candidate count: ${files.length}`);
 
-  const selected = await vscode.window.showQuickPick(
-    fileItems,
-    {
-      placeHolder: 'Select file to search in',
-      matchOnDescription: true
+  // Helper to build fileItems for a given list of files
+  async function buildFileItems(fileList: string[]) {
+    return Promise.all(fileList.map(async file => {
+      const relativePath = path.relative(workspaceFolder!, file);
+      let preview = '';
+      try {
+        const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file));
+        const text = content.toString();
+        preview = text.split('\n').slice(0, 3).join('\n');
+      } catch {
+        preview = '[Unable to read file]';
+      }
+      return {
+        label: relativePath,
+        description: file,
+        detail: preview
+      };
+    }));
+  }
+
+  // Show top 30 frecency files initially
+  let fileItems = await buildFileItems(getTopFrecencyFiles(context, files, 30));
+  outputChannel.appendLine(`[Live Search] Showing top ${fileItems.length} files in picker.`);
+
+  const quickPick = vscode.window.createQuickPick();
+  quickPick.items = fileItems;
+  quickPick.placeholder = 'Select file to search in';
+  quickPick.matchOnDescription = true;
+  quickPick.busy = false;
+
+  quickPick.onDidChangeValue(async (value) => {
+    if (!value) {
+      quickPick.items = await buildFileItems(getTopFrecencyFiles(context, files, 30));
+      outputChannel.appendLine('[Live Search] Picker reset to top frecency files.');
+      return;
     }
-  );
-  return selected?.description;
+    // Filter files by value (case-insensitive substring match)
+    const filtered = files.filter(f => f.toLowerCase().includes(value.toLowerCase()));
+    quickPick.items = await buildFileItems(filtered.slice(0, 30));
+    outputChannel.appendLine(`[Live Search] Picker filtered: ${filtered.length} matches, showing ${Math.min(filtered.length, 30)}.`);
+  });
+
+  return new Promise<string | undefined>((resolve) => {
+    let resolved = false;
+    quickPick.onDidAccept(async () => {
+      if (resolved) return;
+      resolved = true;
+      const selected = quickPick.selectedItems[0];
+      quickPick.hide();
+      if (selected?.description) {
+        await updateFileUsage(context, selected.description);
+        outputChannel.appendLine(`[Live Search] File selected: ${selected.description}`);
+      } else {
+        outputChannel.appendLine('[Live Search] File picker accepted, but no file selected.');
+      }
+      resolve(selected?.description);
+    });
+    quickPick.onDidHide(() => {
+      if (resolved) return;
+      resolved = true;
+      outputChannel.appendLine('[Live Search] File picker closed.');
+      resolve(undefined);
+    });
+    quickPick.show();
+  });
 }
 
 async function getCurrentFileFolder(): Promise<string | undefined> {
@@ -398,7 +480,143 @@ async function showCodeLensView(context: vscode.ExtensionContext) {
   await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
 }
 
-export function activate(context: vscode.ExtensionContext) {
+// Persistent cache helpers
+async function saveIndexToCache(context: vscode.ExtensionContext, folderIndex: string[], fileIndex: string[]) {
+  const cachePath = path.join(context.globalStorageUri.fsPath, 'live-search-index.json');
+  const data = JSON.stringify({ folderIndex, fileIndex, timestamp: Date.now() });
+  await vscode.workspace.fs.createDirectory(context.globalStorageUri);
+  await vscode.workspace.fs.writeFile(vscode.Uri.file(cachePath), Buffer.from(data, 'utf8'));
+  outputChannel.appendLine(`[Live Search] Index saved to cache: ${cachePath}`);
+}
+
+async function loadIndexFromCache(context: vscode.ExtensionContext): Promise<{ folderIndex: string[], fileIndex: string[], timestamp: number } | null> {
+  const cachePath = path.join(context.globalStorageUri.fsPath, 'live-search-index.json');
+  try {
+    const data = await vscode.workspace.fs.readFile(vscode.Uri.file(cachePath));
+    const parsed = JSON.parse(data.toString());
+    outputChannel.appendLine(`[Live Search] Index loaded from cache: ${cachePath}`);
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+// Multi-threaded indexing (scaffold)
+async function buildIndexesParallel(root: string, progress?: vscode.Progress<{ message?: string; increment?: number }>): Promise<{ folderIndex: string[], fileIndex: string[] }> {
+  // TODO: Implement worker_threads logic here
+  // For now, fallback to single-threaded
+  outputChannel.appendLine('[Live Search] Multi-threaded indexing not yet implemented, falling back to single-threaded.');
+  await buildIndexes(root, progress);
+  return { folderIndex, fileIndex };
+}
+
+// Helper to launch search-in-file QuickPick for a given file
+async function launchSearchInFileQuickPick(selectedFile: string) {
+  outputChannel.appendLine(`[Live Search] Launching search-in-file picker for: ${selectedFile}`);
+  const quickPick = vscode.window.createQuickPick<SearchResult>();
+
+  quickPick.placeholder = `Search content in ${path.basename(selectedFile)}...`;
+  quickPick.matchOnDescription = true;
+  quickPick.busy = false;
+
+  let currentProcess: ReturnType<typeof spawn> | null = null;
+
+  const runRipgrep = (query: string) => {
+    if (currentProcess) currentProcess.kill();
+    if (!query || query.length < 2) {
+      quickPick.items = [];
+      quickPick.busy = false;
+      outputChannel.appendLine('[Live Search] Search query too short or empty.');
+      return;
+    }
+
+    quickPick.busy = true;
+    let buffer = '';
+    outputChannel.appendLine(`[Live Search] Running ripgrep in file: ${selectedFile} | Query: "${query}"`);
+
+    const ripgrepArgs = [
+      '--vimgrep',
+      '--smart-case',
+      '--no-heading',
+      '--color', 'never',
+      '--text',
+      query,
+      selectedFile
+    ];
+
+    currentProcess = spawn('rg', ripgrepArgs, { 
+      cwd: workspaceFolder
+    });
+
+    if (currentProcess.stdout) {
+      currentProcess.stdout.on('data', (data) => buffer += data.toString());
+    }
+
+    currentProcess.on('close', () => {
+      const lines = buffer.split('\n');
+      const results: SearchResult[] = [];
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+        if (match) {
+          const [, file, lineNum, text] = match;
+          results.push({
+            label: `Line ${lineNum}`,
+            description: text.trim(),
+            detail: file,
+            filePath: file,
+            line: parseInt(lineNum, 10) - 1,
+            text: text.trim()
+          });
+        }
+      }
+
+      // Sort by line number
+      results.sort((a, b) => a.line - b.line);
+
+      lastSearchResults = results;
+      outputChannel.appendLine(`[Live Search] Search complete. Results: ${results.length}`);
+
+      quickPick.items = results.length > 0
+        ? results
+        : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
+      quickPick.busy = false;
+    });
+
+    currentProcess.on('error', (err) => {
+      outputChannel.appendLine(`[Live Search] Ripgrep process error: ${err}`);
+    });
+  };
+
+  const debouncedSearch = debounce(runRipgrep, SEARCH_DEBOUNCE_MS);
+  quickPick.onDidChangeValue(debouncedSearch);
+
+  quickPick.onDidAccept(async () => {
+    const selected = quickPick.selectedItems[0];
+    if (selected && selected.line >= 0) {
+      outputChannel.appendLine(`[Live Search] Opening file at line: ${selected.line + 1}`);
+      const doc = await vscode.workspace.openTextDocument(selected.filePath);
+      const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+      const pos = new vscode.Position(selected.line, 0);
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    } else {
+      outputChannel.appendLine('[Live Search] Search-in-file picker accepted, but no result selected.');
+    }
+    quickPick.hide();
+  });
+
+  quickPick.onDidHide(() => {
+    outputChannel.appendLine('[Live Search] Search-in-file picker closed.');
+    quickPick.dispose();
+    workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  });
+  
+  quickPick.show();
+}
+
+export async function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
   // Output channel for logging
@@ -416,24 +634,41 @@ export function activate(context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (workspaceFolders && workspaceFolders.length > 0) {
     workspaceFolder = workspaceFolders[0].uri.fsPath;
-    vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Window,
-        title: 'Live Search: Indexing workspace...',
-        cancellable: false
-      },
-      async (progress) => {
-        statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
-        statusBarItem.tooltip = 'Indexing workspace for Live Search...';
-        statusBarItem.command = undefined;
-        await buildIndexes(workspaceFolder!, progress);
-      }
-    ).then(() => {
-      vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
-      statusBarItem.text = '$(search) Live Search: Ready';
+    // Try to load from cache first
+    const cached = await loadIndexFromCache(context);
+    let useCache = false;
+    if (cached && Date.now() - cached.timestamp < 1000 * 60 * 60) { // 1 hour freshness
+      folderIndex = cached.folderIndex;
+      fileIndex = cached.fileIndex;
+      useCache = true;
+      outputChannel.appendLine('[Live Search] Using cached index.');
+      statusBarItem.text = '$(search) Live Search: Ready (cached)';
       statusBarItem.tooltip = 'Click to launch Live Search';
       statusBarItem.command = 'telescopeLikeSearch.chooseScope';
-    });
+    }
+    if (!useCache) {
+      vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Window,
+          title: 'Live Search: Indexing workspace...',
+          cancellable: false
+        },
+        async (progress) => {
+          statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
+          statusBarItem.tooltip = 'Indexing workspace for Live Search...';
+          statusBarItem.command = undefined;
+          const { folderIndex: fIdx, fileIndex: fiIdx } = await buildIndexesParallel(workspaceFolder!, progress);
+          folderIndex = fIdx;
+          fileIndex = fiIdx;
+          await saveIndexToCache(context, folderIndex, fileIndex);
+        }
+      ).then(() => {
+        vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
+        statusBarItem.text = '$(search) Live Search: Ready';
+        statusBarItem.tooltip = 'Click to launch Live Search';
+        statusBarItem.command = 'telescopeLikeSearch.chooseScope';
+      });
+    }
     setupIndexWatchers(context, workspaceFolder);
   }
 
@@ -492,100 +727,17 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.startInFile', async () => {
-      const selectedFile = await selectFileToSearch();
-      if (!selectedFile) return;
-
-      const quickPick = vscode.window.createQuickPick<SearchResult>();
-      lastQuickPick = quickPick;
-
-      quickPick.placeholder = `Search content in ${path.basename(selectedFile)}...`;
-      quickPick.matchOnDescription = true;
-      quickPick.busy = false;
-
-      let currentProcess: ReturnType<typeof spawn> | null = null;
-
-      const runRipgrep = (query: string) => {
-        if (currentProcess) currentProcess.kill();
-        if (!query || query.length < 2) {
-          quickPick.items = [];
-          quickPick.busy = false;
+      try {
+        const selectedFile = await selectFileToSearch(context);
+        if (!selectedFile) {
+          outputChannel.appendLine('[Live Search] No file selected, not launching search-in-file picker.');
           return;
         }
-
-        quickPick.busy = true;
-        let buffer = '';
-
-        const ripgrepArgs = [
-          '--vimgrep',
-          '--smart-case',
-          '--no-heading',
-          '--color', 'never',
-          '--text',
-          query,
-          selectedFile
-        ];
-
-        currentProcess = spawn('rg', ripgrepArgs, { 
-          cwd: workspaceFolder
-        });
-
-        if (currentProcess.stdout) {
-          currentProcess.stdout.on('data', (data) => buffer += data.toString());
-        }
-
-        currentProcess.on('close', () => {
-          const lines = buffer.split('\n');
-          const results: SearchResult[] = [];
-
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
-            if (match) {
-              const [, file, lineNum, text] = match;
-              results.push({
-                label: `Line ${lineNum}`,
-                description: text.trim(),
-                detail: file,
-                filePath: file,
-                line: parseInt(lineNum, 10) - 1,
-                text: text.trim()
-              });
-            }
-          }
-
-          // Sort by line number
-          results.sort((a, b) => a.line - b.line);
-
-          lastSearchResults = results;
-
-          quickPick.items = results.length > 0
-            ? results
-            : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
-          quickPick.busy = false;
-        });
-      };
-
-      const debouncedSearch = debounce(runRipgrep, SEARCH_DEBOUNCE_MS);
-      quickPick.onDidChangeValue(debouncedSearch);
-
-      quickPick.onDidAccept(async () => {
-        const selected = quickPick.selectedItems[0];
-        if (selected && selected.line >= 0) {
-          const doc = await vscode.workspace.openTextDocument(selected.filePath);
-          const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-          const pos = new vscode.Position(selected.line, 0);
-          editor.selection = new vscode.Selection(pos, pos);
-          editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-        }
-        quickPick.hide();
-      });
-
-      quickPick.onDidHide(() => {
-        quickPick.dispose();
-        workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      });
-      
-      quickPick.show();
+        outputChannel.appendLine(`[Live Search] About to launch search-in-file picker for: ${selectedFile}`);
+        await launchSearchInFileQuickPick(selectedFile);
+      } catch (err) {
+        outputChannel.appendLine(`[Live Search] Error in startInFile command: ${err}`);
+      }
     })
   );
 
