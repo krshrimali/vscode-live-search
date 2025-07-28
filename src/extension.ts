@@ -745,31 +745,75 @@ function initializeFileIndex() {
   });
 }
 
-// Ultra-fast file picker using pre-built index
+// Ultra-fast file picker using pre-built index with preview
 async function showInstantFilePicker(context: vscode.ExtensionContext): Promise<string | undefined> {
   if (!workspaceFileIndex) {
     vscode.window.showErrorMessage('Workspace file index not available.');
     return;
   }
 
-  outputChannel.appendLine('[Live Search] Opening instant file picker...');
+  outputChannel.appendLine('[Live Search] Opening instant file picker with preview...');
   
   // Get files immediately from index (may be empty if not initialized yet)
   let allFiles = workspaceFileIndex.getFilesSync();
+  const searchConfig = getSearchConfig();
+  const previewLines = searchConfig.previewLines;
   
-  const quickPick = vscode.window.createQuickPick<FileQuickPickItem>();
+  const quickPick = vscode.window.createQuickPick<FileWithPreviewQuickPickItem>();
   
   // Setup immediate response
-  quickPick.placeholder = allFiles.length > 0 ? 'Type to search files...' : 'Loading files in background...';
+  quickPick.placeholder = allFiles.length > 0 ? 
+    `Type to search files (showing ${previewLines} line${previewLines > 1 ? 's' : ''} preview)...` : 
+    'Loading files in background...';
   quickPick.matchOnDescription = true;
+  quickPick.matchOnDetail = true;
   quickPick.busy = allFiles.length === 0;
+
+  // Add button to change preview lines
+  quickPick.buttons = [
+    {
+      iconPath: new vscode.ThemeIcon('eye'),
+      tooltip: 'Change preview lines'
+    }
+  ];
+
+  quickPick.onDidTriggerButton(async () => {
+    const options = ['1', '3', '5', '10', '20'].map(num => ({
+      label: num,
+      description: `${num} line${num !== '1' ? 's' : ''}`
+    }));
+    
+    const selected = await vscode.window.showQuickPick(options, {
+      placeHolder: 'Select number of preview lines'
+    });
+    
+    if (selected) {
+      const newPreviewLines = parseInt(selected.label);
+      // Update configuration
+      const config = vscode.workspace.getConfiguration('telescopeLikeSearch');
+      await config.update('previewLines', newPreviewLines, true);
+      
+      // Refresh items with new preview
+      quickPick.busy = true;
+      const currentFiles = quickPick.value ? 
+        allFiles.filter(f => {
+          const relativePath = path.relative(workspaceFolder!, f);
+          return relativePath.toLowerCase().includes(quickPick.value.toLowerCase());
+        }).slice(0, MAX_INITIAL_FILES) : 
+        getTopFrecencyFiles(context, allFiles, MAX_INITIAL_FILES);
+      
+      quickPick.items = await buildFileItemsWithPreview(currentFiles.slice(0, 100), newPreviewLines);
+      quickPick.placeholder = `Type to search files (showing ${newPreviewLines} line${newPreviewLines > 1 ? 's' : ''} preview)...`;
+      quickPick.busy = false;
+    }
+  });
 
   // Show frecency files immediately if we have any files
   if (allFiles.length > 0) {
     const topFiles = getTopFrecencyFiles(context, allFiles, MAX_INITIAL_FILES);
-    const initialItems = await buildFileItemsBatch(topFiles.slice(0, 100));
+    const initialItems = await buildFileItemsWithPreview(topFiles.slice(0, 100), previewLines);
     quickPick.items = initialItems;
-    outputChannel.appendLine(`[Live Search] Showing ${initialItems.length} files instantly from index`);
+    outputChannel.appendLine(`[Live Search] Showing ${initialItems.length} files with preview instantly from index`);
   }
 
   let isDisposed = false;
@@ -782,14 +826,14 @@ async function showInstantFilePicker(context: vscode.ExtensionContext): Promise<
       
       allFiles = files;
       quickPick.busy = false;
-      quickPick.placeholder = 'Type to search files...';
+      quickPick.placeholder = `Type to search files (showing ${previewLines} line${previewLines > 1 ? 's' : ''} preview)...`;
       
       if (!currentFilter) {
         const topFiles = getTopFrecencyFiles(context, allFiles, MAX_INITIAL_FILES);
-        buildFileItemsBatch(topFiles.slice(0, 100)).then(items => {
+        buildFileItemsWithPreview(topFiles.slice(0, 100), previewLines).then(items => {
           if (!isDisposed) {
             quickPick.items = items;
-            outputChannel.appendLine(`[Live Search] Updated with ${items.length} files from completed index`);
+            outputChannel.appendLine(`[Live Search] Updated with ${items.length} files with preview from completed index`);
           }
         });
       }
@@ -801,7 +845,7 @@ async function showInstantFilePicker(context: vscode.ExtensionContext): Promise<
     });
   }
 
-  // Ultra-fast filtering with minimal debounce
+  // Ultra-fast filtering with minimal debounce and preview
   const debouncedFilter = debounce(async (query: string) => {
     if (isDisposed) return;
     
@@ -825,12 +869,12 @@ async function showInstantFilePicker(context: vscode.ExtensionContext): Promise<
         .slice(0, MAX_INITIAL_FILES);
     }
     
-    const items = await buildFileItemsBatch(filteredFiles.slice(0, 100));
+    const items = await buildFileItemsWithPreview(filteredFiles.slice(0, 100), previewLines);
     
     if (isDisposed || currentFilter !== query) return;
     
     quickPick.items = items;
-    outputChannel.appendLine(`[Live Search] Filtered to ${filteredFiles.length} files, showing ${items.length}`);
+    outputChannel.appendLine(`[Live Search] Filtered to ${filteredFiles.length} files with preview, showing ${items.length}`);
   }, 25); // Even faster debounce
 
   quickPick.onDidChangeValue(debouncedFilter);
@@ -1484,7 +1528,12 @@ async function buildFileItemsWithPreview(fileList: string[], previewLines: numbe
 
 // File picker with preview functionality
 async function showFilePickerWithPreview(context: vscode.ExtensionContext): Promise<string | undefined> {
-  // Use the optimized picker as base and add preview
+  // Use the instant picker with preview - it's the fastest option
+  if (workspaceFileIndex) {
+    return showInstantFilePicker(context);
+  }
+  
+  // Fallback to optimized picker without preview if file index not available
   return showOptimizedFilePicker(context);
 }
 
@@ -2245,7 +2294,7 @@ export async function activate(context: vscode.ExtensionContext) {
         },
         {
           label: 'File picker with preview',
-          description: 'Browse and open files with content preview',
+          description: 'Browse and open files with instant content preview',
           command: 'telescopeLikeSearch.filePicker'
         },
         {
