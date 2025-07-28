@@ -16,6 +16,13 @@ interface FileQuickPickItem extends vscode.QuickPickItem {
   filePath: string;
 }
 
+interface ProblemQuickPickItem extends vscode.QuickPickItem {
+  filePath: string;
+  line: number;
+  character: number;
+  diagnostic: vscode.Diagnostic;
+}
+
 let lastSearchResults: SearchResult[] = [];
 let workspaceFolder: string | undefined;
 let lastSearchFolder: string | undefined;
@@ -1904,6 +1911,151 @@ async function showTelescopeWebview(context: vscode.ExtensionContext): Promise<v
   }
 }
 
+// Problems picker with preview functionality
+async function showProblemsPicker(context: vscode.ExtensionContext): Promise<void> {
+  const diagnostics = vscode.languages.getDiagnostics();
+  const searchConfig = getSearchConfig();
+  const previewLines = searchConfig.previewLines;
+  
+  if (diagnostics.length === 0) {
+    vscode.window.showInformationMessage('No problems found in the workspace.');
+    return;
+  }
+
+  const problemItems: ProblemQuickPickItem[] = [];
+  
+  for (const [uri, fileDiagnostics] of diagnostics) {
+    const filePath = uri.fsPath;
+    
+    // Skip files that don't exist or are outside workspace
+    if (!fs.existsSync(filePath)) continue;
+    
+    for (const diagnostic of fileDiagnostics) {
+      const line = diagnostic.range.start.line;
+      const character = diagnostic.range.start.character;
+      
+      // Get severity icon
+      let severityIcon = '';
+      let severityText = '';
+      switch (diagnostic.severity) {
+        case vscode.DiagnosticSeverity.Error:
+          severityIcon = '❌';
+          severityText = 'Error';
+          break;
+        case vscode.DiagnosticSeverity.Warning:
+          severityIcon = '⚠️';
+          severityText = 'Warning';
+          break;
+        case vscode.DiagnosticSeverity.Information:
+          severityIcon = 'ℹ️';
+          severityText = 'Info';
+          break;
+        case vscode.DiagnosticSeverity.Hint:
+          severityIcon = '💡';
+          severityText = 'Hint';
+          break;
+        default:
+          severityIcon = '❓';
+          severityText = 'Unknown';
+      }
+      
+      // Get file content for preview
+      let preview = '';
+      try {
+        const fileContent = fs.readFileSync(filePath, 'utf8');
+        const lines = fileContent.split('\n');
+        
+        // Get context lines around the problem
+        const startLine = Math.max(0, line - Math.floor(previewLines / 2));
+        const endLine = Math.min(lines.length - 1, line + Math.floor(previewLines / 2));
+        
+        const previewLinesArray = [];
+        for (let i = startLine; i <= endLine; i++) {
+          const lineNumber = i + 1;
+          const lineContent = lines[i] || '';
+          const isCurrentLine = i === line;
+          const prefix = isCurrentLine ? '→ ' : '  ';
+          previewLinesArray.push(`${prefix}${lineNumber.toString().padStart(4)}: ${lineContent}`);
+        }
+        preview = previewLinesArray.join('\n');
+      } catch (error) {
+        preview = 'Unable to read file content';
+      }
+      
+      const relativePath = workspaceFolder ? path.relative(workspaceFolder, filePath) : path.basename(filePath);
+      
+      problemItems.push({
+        label: `${severityIcon} ${diagnostic.message}`,
+        description: `${relativePath}:${line + 1}:${character + 1}`,
+        detail: preview,
+        filePath,
+        line,
+        character,
+        diagnostic
+      });
+    }
+  }
+  
+  if (problemItems.length === 0) {
+    vscode.window.showInformationMessage('No problems found in accessible files.');
+    return;
+  }
+
+  // Sort by severity (errors first, then warnings, etc.)
+  problemItems.sort((a, b) => {
+    const severityOrder = [
+      vscode.DiagnosticSeverity.Error,
+      vscode.DiagnosticSeverity.Warning,
+      vscode.DiagnosticSeverity.Information,
+      vscode.DiagnosticSeverity.Hint
+    ];
+    const aSeverity = severityOrder.indexOf(a.diagnostic.severity ?? vscode.DiagnosticSeverity.Error);
+    const bSeverity = severityOrder.indexOf(b.diagnostic.severity ?? vscode.DiagnosticSeverity.Error);
+    
+    if (aSeverity !== bSeverity) {
+      return aSeverity - bSeverity;
+    }
+    
+    // If same severity, sort by file path then line number
+    if (a.filePath !== b.filePath) {
+      return a.filePath.localeCompare(b.filePath);
+    }
+    
+    return a.line - b.line;
+  });
+
+  const quickPick = vscode.window.createQuickPick<ProblemQuickPickItem>();
+  quickPick.items = problemItems;
+  quickPick.placeholder = 'Search problems...';
+  quickPick.matchOnDescription = true;
+  quickPick.matchOnDetail = true;
+  
+  // Show the picker and focus on the search input
+  quickPick.show();
+  
+  quickPick.onDidChangeSelection(async (selection) => {
+    if (selection.length > 0) {
+      const selected = selection[0];
+      quickPick.hide();
+      
+      try {
+        const document = await vscode.workspace.openTextDocument(selected.filePath);
+        const editor = await vscode.window.showTextDocument(document);
+        
+        const position = new vscode.Position(selected.line, selected.character);
+        editor.selection = new vscode.Selection(position, position);
+        editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+      }
+    }
+  });
+  
+  quickPick.onDidHide(() => {
+    quickPick.dispose();
+  });
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
@@ -2301,6 +2453,11 @@ export async function activate(context: vscode.ExtensionContext) {
           label: 'Telescope-style file browser',
           description: 'Browse files with two-sidebar layout and line wrapping',
           command: 'telescopeLikeSearch.telescopeWebview'
+        },
+        {
+          label: 'Problems picker',
+          description: 'Browse and navigate to problems/diagnostics with preview',
+          command: 'telescopeLikeSearch.problemsPicker'
         }
       ];
       const selected = await vscode.window.showQuickPick(options, {
@@ -2310,6 +2467,12 @@ export async function activate(context: vscode.ExtensionContext) {
       if (selected) {
         await vscode.commands.executeCommand(selected.command);
       }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.problemsPicker', async () => {
+      await showProblemsPicker(context);
     })
   );
 }

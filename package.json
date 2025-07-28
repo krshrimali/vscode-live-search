@@ -40,6 +40,10 @@
       {
         "command": "telescopeLikeSearch.telescopeWebview",
         "title": "Live Search: Telescope File Browser"
+      },
+      {
+        "command": "telescopeLikeSearch.problemsPicker",
+        "title": "Live Search: Problems Picker"
       }
       
     ],
@@ -72,6 +76,11 @@
       {
         "key": "ctrl+p",
         "command": "telescopeLikeSearch.filePicker",
+        "when": "!inQuickOpen"
+      },
+      {
+        "key": "ctrl+shift+m",
+        "command": "telescopeLikeSearch.problemsPicker",
         "when": "!inQuickOpen"
       }
     ],
