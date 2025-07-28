@@ -612,8 +612,278 @@ async function getAllFilesFallback(rootPath: string): Promise<string[]> {
   return files;
 }
 
+// Persistent file index similar to VSCode's approach
+class WorkspaceFileIndex {
+  private files: Set<string> = new Set();
+  private isInitialized = false;
+  private initPromise: Promise<void> | null = null;
+  private watcher: vscode.FileSystemWatcher | null = null;
+  
+  constructor(private workspaceRoot: string, private outputChannel: vscode.OutputChannel) {
+    this.setupFileWatcher();
+  }
+
+  private setupFileWatcher() {
+    // Create a comprehensive file watcher
+    this.watcher = vscode.workspace.createFileSystemWatcher('**/*', false, true, false);
+    
+    this.watcher.onDidCreate((uri) => {
+      if (uri.scheme === 'file' && this.isRelevantFile(uri.fsPath)) {
+        this.files.add(uri.fsPath);
+        this.outputChannel.appendLine(`[File Index] Added: ${uri.fsPath}`);
+      }
+    });
+
+    this.watcher.onDidDelete((uri) => {
+      if (uri.scheme === 'file') {
+        this.files.delete(uri.fsPath);
+        this.outputChannel.appendLine(`[File Index] Removed: ${uri.fsPath}`);
+      }
+    });
+  }
+
+  private isRelevantFile(filePath: string): boolean {
+    const relativePath = path.relative(this.workspaceRoot, filePath);
+    
+    // Skip if outside workspace
+    if (relativePath.startsWith('..')) return false;
+    
+    // Skip common directories that should be excluded
+    const excludedDirs = [
+      'node_modules', '.git', 'dist', 'build', '.vscode', '.idea',
+      'coverage', '.nyc_output', 'target', 'bin', 'obj', '.next',
+      'out', '.cache', 'tmp', 'temp', '__pycache__'
+    ];
+    
+    for (const dir of excludedDirs) {
+      if (relativePath.includes(`${dir}/`) || relativePath.includes(`${dir}\\`)) {
+        return false;
+      }
+    }
+    
+    // Assume it's a file if it passes directory checks
+    // The file watcher should only notify us about actual files anyway
+    return true;
+  }
+
+  async initialize(): Promise<void> {
+    if (this.isInitialized) return;
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = this.doInitialize();
+    return this.initPromise;
+  }
+
+  private async doInitialize(): Promise<void> {
+    const startTime = Date.now();
+    this.outputChannel.appendLine('[File Index] Starting background initialization...');
+    
+    try {
+      // Use VSCode's built-in file search for the initial index
+      const files = await vscode.workspace.findFiles(
+        '**/*',
+        '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/.vscode/**,**/.idea/**,**/coverage/**,**/.nyc_output/**,**/target/**,**/bin/**,**/obj/**,**/.next/**,**/out/**,**/.cache/**,**/tmp/**,**/temp/**,**/__pycache__/**}',
+        50000 // Reasonable limit
+      );
+      
+      for (const file of files) {
+        if (file.scheme === 'file') {
+          this.files.add(file.fsPath);
+        }
+      }
+      
+      this.isInitialized = true;
+      const duration = Date.now() - startTime;
+      this.outputChannel.appendLine(`[File Index] Initialized with ${this.files.size} files in ${duration}ms`);
+    } catch (error) {
+      this.outputChannel.appendLine(`[File Index] Initialization failed: ${error}`);
+      // Fallback to empty index rather than failing completely
+      this.isInitialized = true;
+    }
+  }
+
+  async getFiles(): Promise<string[]> {
+    await this.initialize();
+    return Array.from(this.files);
+  }
+
+  getFilesSync(): string[] {
+    if (!this.isInitialized) {
+      return [];
+    }
+    return Array.from(this.files);
+  }
+
+  dispose() {
+    if (this.watcher) {
+      this.watcher.dispose();
+      this.watcher = null;
+    }
+  }
+}
+
+// Global file index instance
+let workspaceFileIndex: WorkspaceFileIndex | null = null;
+
+// Initialize file index when workspace is available
+function initializeFileIndex() {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    return;
+  }
+
+  if (workspaceFileIndex) {
+    workspaceFileIndex.dispose();
+  }
+
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+  workspaceFileIndex = new WorkspaceFileIndex(workspaceFolder, outputChannel);
+  
+  // Start background initialization immediately
+  workspaceFileIndex.initialize().catch(error => {
+    outputChannel.appendLine(`[File Index] Background initialization failed: ${error}`);
+  });
+}
+
+// Ultra-fast file picker using pre-built index
+async function showInstantFilePicker(context: vscode.ExtensionContext): Promise<string | undefined> {
+  if (!workspaceFileIndex) {
+    vscode.window.showErrorMessage('Workspace file index not available.');
+    return;
+  }
+
+  outputChannel.appendLine('[Live Search] Opening instant file picker...');
+  
+  // Get files immediately from index (may be empty if not initialized yet)
+  let allFiles = workspaceFileIndex.getFilesSync();
+  
+  const quickPick = vscode.window.createQuickPick<FileQuickPickItem>();
+  
+  // Setup immediate response
+  quickPick.placeholder = allFiles.length > 0 ? 'Type to search files...' : 'Loading files in background...';
+  quickPick.matchOnDescription = true;
+  quickPick.busy = allFiles.length === 0;
+
+  // Show frecency files immediately if we have any files
+  if (allFiles.length > 0) {
+    const topFiles = getTopFrecencyFiles(context, allFiles, MAX_INITIAL_FILES);
+    const initialItems = await buildFileItemsBatch(topFiles.slice(0, 100));
+    quickPick.items = initialItems;
+    outputChannel.appendLine(`[Live Search] Showing ${initialItems.length} files instantly from index`);
+  }
+
+  let isDisposed = false;
+  let currentFilter = '';
+
+  // If index is not ready, load in background
+  if (allFiles.length === 0) {
+    workspaceFileIndex.getFiles().then(files => {
+      if (isDisposed) return;
+      
+      allFiles = files;
+      quickPick.busy = false;
+      quickPick.placeholder = 'Type to search files...';
+      
+      if (!currentFilter) {
+        const topFiles = getTopFrecencyFiles(context, allFiles, MAX_INITIAL_FILES);
+        buildFileItemsBatch(topFiles.slice(0, 100)).then(items => {
+          if (!isDisposed) {
+            quickPick.items = items;
+            outputChannel.appendLine(`[Live Search] Updated with ${items.length} files from completed index`);
+          }
+        });
+      }
+    }).catch(error => {
+      if (!isDisposed) {
+        quickPick.busy = false;
+        outputChannel.appendLine(`[Live Search] Error loading file index: ${error}`);
+      }
+    });
+  }
+
+  // Ultra-fast filtering with minimal debounce
+  const debouncedFilter = debounce(async (query: string) => {
+    if (isDisposed) return;
+    
+    currentFilter = query;
+    
+    // Use current files (might be empty initially)
+    const files = allFiles.length > 0 ? allFiles : workspaceFileIndex!.getFilesSync();
+    
+    let filteredFiles: string[];
+    
+    if (!query) {
+      filteredFiles = getTopFrecencyFiles(context, files, MAX_INITIAL_FILES);
+    } else {
+      // Super fast filtering - just check if the relative path includes the query
+      const lowerQuery = query.toLowerCase();
+      filteredFiles = files
+        .filter(file => {
+          const relativePath = path.relative(workspaceFolder!, file);
+          return relativePath.toLowerCase().includes(lowerQuery);
+        })
+        .slice(0, MAX_INITIAL_FILES);
+    }
+    
+    const items = await buildFileItemsBatch(filteredFiles.slice(0, 100));
+    
+    if (isDisposed || currentFilter !== query) return;
+    
+    quickPick.items = items;
+    outputChannel.appendLine(`[Live Search] Filtered to ${filteredFiles.length} files, showing ${items.length}`);
+  }, 25); // Even faster debounce
+
+  quickPick.onDidChangeValue(debouncedFilter);
+
+  return new Promise<string | undefined>((resolve) => {
+    let resolved = false;
+    
+    quickPick.onDidAccept(async () => {
+      if (resolved || isDisposed) return;
+      resolved = true;
+      isDisposed = true;
+      
+      const selected = quickPick.selectedItems[0];
+      quickPick.hide();
+      
+      if (selected?.filePath) {
+        await updateFileUsage(context, selected.filePath);
+        outputChannel.appendLine(`[Live Search] File selected: ${selected.filePath}`);
+        
+        // Open the selected file
+        try {
+          const document = await vscode.workspace.openTextDocument(selected.filePath);
+          await vscode.window.showTextDocument(document);
+        } catch (error) {
+          vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+        }
+        
+        resolve(selected.filePath);
+      } else {
+        resolve(undefined);
+      }
+    });
+    
+    quickPick.onDidHide(() => {
+      if (resolved) return;
+      resolved = true;
+      isDisposed = true;
+      outputChannel.appendLine('[Live Search] Instant file picker closed.');
+      resolve(undefined);
+    });
+    
+    quickPick.show();
+  });
+}
+
 // Optimized file picker with lazy loading and virtualization
 async function showOptimizedFilePicker(context: vscode.ExtensionContext): Promise<string | undefined> {
+  // Use the instant picker if available, fallback to the previous optimized version
+  if (workspaceFileIndex) {
+    return showInstantFilePicker(context);
+  }
+  
+  // Fallback to previous implementation
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     vscode.window.showErrorMessage('No workspace folder open.');
@@ -1126,10 +1396,11 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
 
 // Clear cache when files change to ensure freshness
 function setupCacheInvalidation(context: vscode.ExtensionContext) {
+  // Note: File index has its own watcher, we only need to clear search cache here
   const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, false, false);
   
   watcher.onDidChange(() => {
-    // Clear both search cache and file cache when files are modified
+    // Clear search cache when files are modified
     if (searchCache.size > 0) {
       searchCache.clear();
       outputChannel.appendLine('[Live Search] Search cache cleared due to file changes');
@@ -1139,7 +1410,7 @@ function setupCacheInvalidation(context: vscode.ExtensionContext) {
   });
   
   watcher.onDidCreate(() => {
-    // Clear both caches when files are created
+    // Clear search cache when files are created (file index handles its own updates)
     if (searchCache.size > 0) {
       searchCache.clear();
       outputChannel.appendLine('[Live Search] Search cache cleared due to new files');
@@ -1149,7 +1420,7 @@ function setupCacheInvalidation(context: vscode.ExtensionContext) {
   });
   
   watcher.onDidDelete(() => {
-    // Clear both caches when files are deleted
+    // Clear search cache when files are deleted (file index handles its own updates)
     if (searchCache.size > 0) {
       searchCache.clear();
       outputChannel.appendLine('[Live Search] Search cache cleared due to file deletions');
@@ -1603,33 +1874,26 @@ export async function activate(context: vscode.ExtensionContext) {
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
-  // Initialize workspace folder
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (workspaceFolders && workspaceFolders.length > 0) {
-    workspaceFolder = workspaceFolders[0].uri.fsPath;
-    // Remove indexing logic
-    // vscode.window.withProgress(
-    //   {
-    //     location: vscode.ProgressLocation.Window,
-    //     title: 'Live Search: Indexing workspace...',
-    //     cancellable: false
-    //   },
-    //   async (progress) => {
-    //     statusBarItem.text = '$(sync~spin) Live Search: Indexing...';
-    //     statusBarItem.tooltip = 'Indexing workspace for Live Search...';
-    //     statusBarItem.command = undefined;
-    //     const { folderIndex: fIdx, fileIndex: fiIdx } = await buildIndexesParallel(workspaceFolder!, progress);
-    //     folderIndex = fIdx;
-    //     fileIndex = fiIdx;
-    //   }
-    // ).then(() => {
-    //   vscode.window.setStatusBarMessage('Live Search: Indexing complete!', 3000);
-    //   statusBarItem.text = '$(search) Live Search: Ready';
-    //   statusBarItem.tooltip = 'Click to launch Live Search';
-    //   statusBarItem.command = 'telescopeLikeSearch.chooseScope';
-    // });
-    // setupIndexWatchers(context, workspaceFolder);
-  }
+  // Initialize file index immediately
+  initializeFileIndex();
+  
+  // Watch for workspace changes
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      outputChannel.appendLine('[Live Search] Workspace folders changed, reinitializing file index...');
+      initializeFileIndex();
+    })
+  );
+  
+  // Ensure file index is disposed on deactivation
+  context.subscriptions.push({
+    dispose: () => {
+      if (workspaceFileIndex) {
+        workspaceFileIndex.dispose();
+        workspaceFileIndex = null;
+      }
+    }
+  });
 
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.openLineFromVirtualDoc', async () => {
