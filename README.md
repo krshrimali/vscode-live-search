@@ -8,6 +8,7 @@ A fast and elegant search UI for Visual Studio Code, inspired by Neovim's Telesc
 - 👁 Hover to preview content from matching file
 - 📂 Foldable sections for better readability
 - 🧑‍💻 Works with VSCodeVim (`j/k`, `:q`, etc.)
+- 📁 File picker with content preview (like Ctrl+P but with file content preview)
 
 Please make sure to have `ripgrep` installed on your system.
 
@@ -25,6 +26,13 @@ Please make sure to have `ripgrep` installed on your system.
 - Triggered by `Live Search` command
 - Uses `ripgrep` under the hood for blazing-fast results
 - Debounced, fuzzy filtering while typing
+
+### 📁 File Picker with Preview
+- Similar to VSCode's Ctrl+P but shows file content preview
+- Configurable number of preview lines (1, 3, 5, 10, or 20 lines)
+- Interactive button to change preview lines on-the-fly
+- Fuzzy file name and path matching
+- Frecency-based file ranking (most frequently and recently used files first)
 
 ### 📄 Result View (CodeLens Style)
 - Shows matches grouped per file
@@ -54,12 +62,19 @@ Please make sure to have `ripgrep` installed on your system.
 | Command                                     | Description                               |
 |--------------------------------------------|-------------------------------------------|
 | `Live Search`                  | Opens the search QuickPick                |
+| `Live Search: File Picker with Preview`    | Opens file picker with content preview   |
+| `Live Search: Choose Search Scope`         | Shows menu to choose between different search modes |
 
 ---
 
 ## ⌨️ Default Keybindings
 
 ```json
+{
+  "key": "ctrl+p",
+  "command": "telescopeLikeSearch.filePicker",
+  "when": "!inQuickOpen"
+},
 {
   "key": "ctrl+l",
   "command": "telescopeLikeSearch.openCodelensViewFromPicker",
@@ -69,6 +84,32 @@ Please make sure to have `ripgrep` installed on your system.
   "key": "ctrl+enter",
   "command": "telescopeLikeSearch.openLineFromVirtualDoc",
   "when": "editorTextFocus && resourceScheme == 'telescope-results'"
+}
+```
+
+---
+
+## ⚙️ Configuration
+
+The extension provides several configuration options:
+
+```json
+{
+  // Number of lines to show in file preview (default: 1)
+  "telescopeLikeSearch.previewLines": 1,
+  
+  // Maximum number of items to show in pickers (default: 30)
+  "telescopeLikeSearch.maxItemsInPicker": 30,
+  
+  // Glob patterns for files to exclude from search
+  "telescopeLikeSearch.excludePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/.git/**"
+  ],
+  
+  // Maximum file size in bytes to include in search (default: 1MB)
+  "telescopeLikeSearch.maxFileSize": 1048576
 }
 ```
 
