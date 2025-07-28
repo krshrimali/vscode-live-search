@@ -981,10 +981,35 @@ async function buildFileItemsWithPreview(fileList: string[], previewLines: numbe
     const fileDir = path.dirname(relativePath);
     const preview = await getFilePreview(file, previewLines);
     
+    // For multiple lines, format them with proper line breaks and numbering
+    let formattedDetail: string;
+    if (previewLines > 1 && preview.includes('\n')) {
+      const lines = preview.split('\n');
+      const maxDetailLength = 300; // Increased limit for multi-line previews
+      
+      // Format each line with line numbers and proper spacing
+      const formattedLines = lines.map((line, index) => {
+        const lineNum = (index + 1).toString().padStart(2, ' ');
+        const trimmedLine = line.length > 80 ? line.substring(0, 77) + '...' : line;
+        return `${lineNum}: ${trimmedLine}`;
+      });
+      
+      formattedDetail = formattedLines.join('\n');
+      
+      // If the total formatted detail is too long, truncate it
+      if (formattedDetail.length > maxDetailLength) {
+        const truncatedLines = formattedLines.slice(0, Math.floor(maxDetailLength / 85)); // Rough estimate
+        formattedDetail = truncatedLines.join('\n') + '\n...';
+      }
+    } else {
+      // Single line preview - keep original behavior
+      formattedDetail = preview.length > 100 ? preview.substring(0, 100) + '...' : preview;
+    }
+    
     return {
       label: fileName,
       description: fileDir === '.' ? '' : fileDir,
-      detail: preview.length > 100 ? preview.substring(0, 100) + '...' : preview,
+      detail: formattedDetail,
       filePath: file,
       preview: preview
     };
