@@ -1714,10 +1714,10 @@ function getTelescopeWebviewContent(items: TelescopeWebviewItem[], selectedIndex
                 return;
             }
             
-                         const lines = item.preview.split('\\\\n');
-             previewContent.innerHTML = lines.map((line, i) => 
-                 \`<div class="preview-line"><span class="line-number">\${i + 1}</span>\${line || ' '}</div>\`
-             ).join('');
+            const lines = item.preview.split('\\n');
+            previewContent.innerHTML = lines.map((line, i) => 
+                \`<div class="preview-line"><span class="line-number">\${i + 1}</span>\${line || ' '}</div>\`
+            ).join('');
         }
         
         function updateFileList() {
