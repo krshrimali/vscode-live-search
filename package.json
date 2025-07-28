@@ -30,9 +30,14 @@
         "title": "Live Search: Choose Search Scope"
       },
       {
+        "command": "telescopeLikeSearch.clearCache",
+        "title": "Live Search: Clear Cache"
+      },
+      {
         "command": "telescopeLikeSearch.filePicker",
         "title": "Live Search: File Picker with Preview"
       }
+      
     ],
     "keybindings": [
       {
