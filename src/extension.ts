@@ -16,6 +16,11 @@ interface FileQuickPickItem extends vscode.QuickPickItem {
   filePath: string;
 }
 
+interface FileWithPreviewQuickPickItem extends vscode.QuickPickItem {
+  filePath: string;
+  preview?: string;
+}
+
 let lastSearchResults: SearchResult[] = [];
 let workspaceFolder: string | undefined;
 let lastSearchFolder: string | undefined;
@@ -30,6 +35,7 @@ interface SearchConfig {
   maxFileSize: number;
   recentFolders: string[];
   maxItemsInPicker: number;
+  previewLines: number;
 }
 
 function getSearchConfig(): SearchConfig {
@@ -44,7 +50,8 @@ function getSearchConfig(): SearchConfig {
     ],
     maxFileSize: config.get('maxFileSize', 1048576),
     recentFolders: config.get('recentFolders', []),
-    maxItemsInPicker: config.get('maxItemsInPicker', 30)
+    maxItemsInPicker: config.get('maxItemsInPicker', 30),
+    previewLines: config.get('previewLines', 1)
   };
 }
 
@@ -847,6 +854,166 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
   quickPick.show();
 }
 
+// Helper function to read file preview
+async function getFilePreview(filePath: string, previewLines: number): Promise<string> {
+  try {
+    const uri = vscode.Uri.file(filePath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    const lines = document.getText().split('\n');
+    const previewText = lines.slice(0, previewLines).join('\n');
+    return previewText || '(empty file)';
+  } catch (error) {
+    return '(unable to read file)';
+  }
+}
+
+// Helper function to build file items with preview
+async function buildFileItemsWithPreview(fileList: string[], previewLines: number): Promise<FileWithPreviewQuickPickItem[]> {
+  const items = await Promise.all(fileList.map(async file => {
+    const relativePath = path.relative(workspaceFolder!, file);
+    const fileName = path.basename(file);
+    const fileDir = path.dirname(relativePath);
+    const preview = await getFilePreview(file, previewLines);
+    
+    return {
+      label: fileName,
+      description: fileDir === '.' ? '' : fileDir,
+      detail: preview.length > 100 ? preview.substring(0, 100) + '...' : preview,
+      filePath: file,
+      preview: preview
+    };
+  }));
+  
+  return items;
+}
+
+// File picker with preview functionality
+async function showFilePickerWithPreview(context: vscode.ExtensionContext): Promise<string | undefined> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    vscode.window.showErrorMessage('No workspace folder open.');
+    return;
+  }
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading files with preview...');
+
+  try {
+    // Get all files
+    const files = await getAllFiles(workspaceFolder);
+    const searchConfig = getSearchConfig();
+    const maxItems = searchConfig.maxItemsInPicker;
+    const previewLines = searchConfig.previewLines;
+    
+    outputChannel.appendLine(`[Live Search] File picker with preview candidate count: ${files.length}`);
+
+    // Get top frecency files
+    const topFiles = getTopFrecencyFiles(context, files);
+    let fileItems = await buildFileItemsWithPreview(topFiles, previewLines);
+    outputChannel.appendLine(`[Live Search] Showing top ${fileItems.length} files with preview in picker.`);
+
+    const quickPick = vscode.window.createQuickPick<FileWithPreviewQuickPickItem>();
+    quickPick.items = fileItems;
+    quickPick.placeholder = `Select file (showing ${previewLines} line${previewLines > 1 ? 's' : ''} preview)`;
+    quickPick.matchOnDescription = true;
+    quickPick.matchOnDetail = true;
+    quickPick.busy = false;
+
+    // Add button to change preview lines
+    quickPick.buttons = [
+      {
+        iconPath: new vscode.ThemeIcon('eye'),
+        tooltip: 'Change preview lines'
+      }
+    ];
+
+    quickPick.onDidTriggerButton(async () => {
+      const options = ['1', '3', '5', '10', '20'].map(num => ({
+        label: num,
+        description: `${num} line${num !== '1' ? 's' : ''}`
+      }));
+      
+      const selected = await vscode.window.showQuickPick(options, {
+        placeHolder: 'Select number of preview lines'
+      });
+      
+      if (selected) {
+        const newPreviewLines = parseInt(selected.label);
+        // Update configuration
+        const config = vscode.workspace.getConfiguration('telescopeLikeSearch');
+        await config.update('previewLines', newPreviewLines, true);
+        
+        // Refresh items with new preview
+        quickPick.busy = true;
+        const currentFiles = quickPick.value ? 
+          files.filter(f => {
+            const relativePath = path.relative(workspaceFolder!, f);
+            return relativePath.toLowerCase().includes(quickPick.value.toLowerCase());
+          }).slice(0, maxItems) : 
+          getTopFrecencyFiles(context, files);
+        
+        quickPick.items = await buildFileItemsWithPreview(currentFiles, newPreviewLines);
+        quickPick.placeholder = `Select file (showing ${newPreviewLines} line${newPreviewLines > 1 ? 's' : ''} preview)`;
+        quickPick.busy = false;
+      }
+    });
+
+    quickPick.onDidChangeValue(async (value) => {
+      if (!value) {
+        quickPick.items = await buildFileItemsWithPreview(getTopFrecencyFiles(context, files), previewLines);
+        outputChannel.appendLine('[Live Search] File picker with preview reset to top frecency files.');
+        return;
+      }
+
+      // Filter files by value (case-insensitive substring match)
+      const filtered = files.filter(f => {
+        const relativePath = path.relative(workspaceFolder!, f);
+        return relativePath.toLowerCase().includes(value.toLowerCase());
+      });
+
+      quickPick.busy = true;
+      quickPick.items = await buildFileItemsWithPreview(filtered.slice(0, maxItems), previewLines);
+      quickPick.busy = false;
+      outputChannel.appendLine(`[Live Search] File picker with preview filtered: ${filtered.length} matches, showing ${Math.min(filtered.length, maxItems)}.`);
+    });
+
+    return new Promise<string | undefined>((resolve) => {
+      let resolved = false;
+      quickPick.onDidAccept(async () => {
+        if (resolved) return;
+        resolved = true;
+        const selected = quickPick.selectedItems[0];
+        quickPick.hide();
+        if (selected?.filePath) {
+          await updateFileUsage(context, selected.filePath);
+          outputChannel.appendLine(`[Live Search] File selected from preview picker: ${selected.filePath}`);
+          
+          // Open the selected file
+          const document = await vscode.workspace.openTextDocument(selected.filePath);
+          await vscode.window.showTextDocument(document);
+          
+          resolve(selected.filePath);
+        } else {
+          outputChannel.appendLine('[Live Search] File picker with preview accepted, but no file selected.');
+          resolve(undefined);
+        }
+      });
+      
+      quickPick.onDidHide(() => {
+        if (resolved) return;
+        resolved = true;
+        outputChannel.appendLine('[Live Search] File picker with preview closed.');
+        resolve(undefined);
+      });
+      
+      quickPick.show();
+    });
+  } finally {
+    loadingMessage.dispose();
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
@@ -1121,6 +1288,12 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.filePicker', async () => {
+      await showFilePickerWithPreview(context);
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.chooseScope', async () => {
       const options = [
         {
@@ -1137,6 +1310,11 @@ export async function activate(context: vscode.ExtensionContext) {
           label: 'Select file to search in',
           description: 'Choose a file to limit the search',
           command: 'telescopeLikeSearch.startInFile'
+        },
+        {
+          label: 'File picker with preview',
+          description: 'Browse and open files with content preview',
+          command: 'telescopeLikeSearch.filePicker'
         }
       ];
       const selected = await vscode.window.showQuickPick(options, {

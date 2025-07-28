@@ -28,6 +28,10 @@
       {
         "command": "telescopeLikeSearch.chooseScope",
         "title": "Live Search: Choose Search Scope"
+      },
+      {
+        "command": "telescopeLikeSearch.filePicker",
+        "title": "Live Search: File Picker with Preview"
       }
     ],
     "keybindings": [
@@ -55,6 +59,11 @@
         "key": "ctrl+shift+i",
         "command": "telescopeLikeSearch.startInFile",
         "when": "editorTextFocus"
+      },
+      {
+        "key": "ctrl+p",
+        "command": "telescopeLikeSearch.filePicker",
+        "when": "!inQuickOpen"
       }
     ],
     "configuration": {
@@ -91,6 +100,11 @@
           "type": "number",
           "default": 30,
           "description": "Maximum number of items to show in pickers (default: 30)"
+        },
+        "telescopeLikeSearch.previewLines": {
+          "type": "number",
+          "default": 1,
+          "description": "Number of lines to show in file preview (default: 1)"
         }
       }
     }
