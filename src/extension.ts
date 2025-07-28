@@ -1514,10 +1514,16 @@ async function buildFileItemsWithPreview(fileList: string[], previewLines: numbe
     const fileDir = path.dirname(relativePath);
     const preview = await getFilePreview(file, previewLines);
     
+    // Format preview for QuickPick (VSCode doesn't support multiline in detail field)
+    const previewLinesArray = preview.split('\n');
+    const formattedPreview = previewLinesArray.length > 1 
+      ? `${previewLinesArray[0]} (${previewLinesArray.length} lines total)`
+      : preview;
+    
     return {
       label: fileName,
       description: fileDir === '.' ? '' : fileDir,
-      detail: preview.length > 100 ? preview.substring(0, 100) + '...' : preview,
+      detail: formattedPreview.length > 100 ? formattedPreview.substring(0, 100) + '...' : formattedPreview,
       filePath: file,
       preview: preview
     };
