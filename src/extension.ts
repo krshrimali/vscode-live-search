@@ -2458,6 +2458,11 @@ export async function activate(context: vscode.ExtensionContext) {
           label: 'Problems picker',
           description: 'Browse and navigate to problems/diagnostics with preview',
           command: 'telescopeLikeSearch.problemsPicker'
+        },
+        {
+          label: 'File picker tab',
+          description: 'Browse files in a dedicated tab similar to Problems tab',
+          command: 'telescopeLikeSearch.filePickerTab'
         }
       ];
       const selected = await vscode.window.showQuickPick(options, {
@@ -2473,6 +2478,12 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.problemsPicker', async () => {
       await showProblemsPicker(context);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.filePickerTab', async () => {
+      await showFilePickerTab(context);
     })
   );
 }
@@ -2518,4 +2529,691 @@ function getGitignorePatterns(): string[] {
   } catch {
     return [];
   }
+}
+
+// File picker tab webview implementation - similar to Problems tab
+async function showFilePickerTab(context: vscode.ExtensionContext): Promise<void> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    vscode.window.showErrorMessage('No workspace folder open.');
+    return;
+  }
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading files for file picker tab...');
+
+  try {
+    // Get all files using the fast file index
+    let files: string[] = [];
+    if (workspaceFileIndex) {
+      files = await workspaceFileIndex.getFiles();
+    } else {
+      files = await getAllFiles(workspaceFolder);
+    }
+    
+    outputChannel.appendLine(`[File Picker Tab] Loaded ${files.length} files`);
+
+    // Create and show webview panel
+    const panel = vscode.window.createWebviewPanel(
+      'filePickerTab',
+      'File Picker',
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        localResourceRoots: [context.extensionUri],
+        retainContextWhenHidden: true
+      }
+    );
+
+    const searchConfig = getSearchConfig();
+    const previewLines = searchConfig.previewLines;
+    
+    panel.webview.html = getFilePickerTabContent(files, workspaceFolder, previewLines);
+
+        // Handle messages from webview
+    panel.webview.onDidReceiveMessage(
+      async (message) => {
+        switch (message.command) {
+          case 'openFile':
+            try {
+              await updateFileUsage(context, message.filePath);
+              const document = await vscode.workspace.openTextDocument(message.filePath);
+              await vscode.window.showTextDocument(document);
+              // Don't dispose panel - keep it open like Problems tab
+            } catch (error) {
+              vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+            }
+            break;
+          case 'searchFiles':
+            // Handle real-time search
+            if (workspaceFolder) {
+              const filteredFiles = filterFiles(files, message.query, workspaceFolder);
+              panel.webview.postMessage({
+                command: 'updateFiles',
+                files: filteredFiles
+              });
+            }
+            break;
+          case 'getPreview':
+            try {
+              const previewContent = await getFilePreview(message.filePath, message.previewLines);
+              panel.webview.postMessage({
+                command: 'previewContent',
+                content: previewContent
+              });
+            } catch (error) {
+              panel.webview.postMessage({
+                command: 'previewContent',
+                error: `Unable to read file: ${error}`
+              });
+            }
+            break;
+          case 'changePreviewLines':
+            const options = ['1', '3', '5', '10', '20'].map(num => ({
+              label: num,
+              description: `${num} line${num !== '1' ? 's' : ''}`
+            }));
+            
+            const selected = await vscode.window.showQuickPick(options, {
+              placeHolder: 'Select number of preview lines'
+            });
+            
+            if (selected) {
+              const newPreviewLines = parseInt(selected.label);
+              // Update configuration
+              const config = vscode.workspace.getConfiguration('telescopeLikeSearch');
+              await config.update('previewLines', newPreviewLines, true);
+              
+              // Notify webview of the change
+              panel.webview.postMessage({
+                command: 'updatePreviewLines',
+                previewLines: newPreviewLines
+              });
+            }
+            break;
+          case 'close':
+            panel.dispose();
+            break;
+        }
+      },
+      undefined,
+      context.subscriptions
+    );
+
+    outputChannel.appendLine(`[File Picker Tab] File picker tab opened with ${files.length} files`);
+
+  } catch (error) {
+    vscode.window.showErrorMessage(`Failed to load file picker tab: ${error}`);
+    outputChannel.appendLine(`[File Picker Tab] Error: ${error}`);
+  } finally {
+    loadingMessage.dispose();
+  }
+}
+
+// Helper function to filter files based on search query
+function filterFiles(files: string[], query: string, workspaceRoot: string): Array<{path: string, relativePath: string, name: string}> {
+  if (!query) {
+    // Return all files with basic info
+    return files.map(file => ({
+      path: file,
+      relativePath: path.relative(workspaceRoot, file),
+      name: path.basename(file)
+    }));
+  }
+
+  const lowerQuery = query.toLowerCase();
+  return files
+    .filter(file => {
+      const relativePath = path.relative(workspaceRoot, file);
+      // Search in the relative path primarily, as that's what users will see
+      return relativePath.toLowerCase().includes(lowerQuery);
+    })
+    .map(file => ({
+      path: file,
+      relativePath: path.relative(workspaceRoot, file),
+      name: path.basename(file)
+    }))
+    .slice(0, 1000); // Limit results for performance
+}
+
+// Generate HTML content for file picker tab with preview (Problems tab style)
+function getFilePickerTabContent(files: string[], workspaceRoot: string, previewLines: number): string {
+  const fileItems = files.slice(0, 1000).map(file => {
+    const relativePath = path.relative(workspaceRoot, file);
+    const fileName = path.basename(file);
+    const fileDir = path.dirname(relativePath);
+    
+    return {
+      path: file,
+      relativePath: relativePath,
+      name: fileName,
+      directory: fileDir === '.' ? '' : fileDir
+    };
+  });
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Picker</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            color: var(--vscode-foreground);
+            background-color: var(--vscode-panel-background);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .toolbar {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background-color: var(--vscode-panel-background);
+            border-bottom: 1px solid var(--vscode-panel-border);
+            gap: 8px;
+        }
+        
+        .search-container {
+            flex: 1;
+            position: relative;
+        }
+        
+        .search-input {
+            width: 100%;
+            padding: 4px 8px;
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 2px;
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+        }
+        
+        .search-input:focus {
+            border-color: var(--vscode-focusBorder);
+        }
+        
+        .preview-lines-btn {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: 1px solid var(--vscode-button-border);
+            border-radius: 2px;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 0.85em;
+            white-space: nowrap;
+        }
+        
+        .preview-lines-btn:hover {
+            background-color: var(--vscode-button-hoverBackground);
+        }
+        
+        .file-count {
+            color: var(--vscode-descriptionForeground);
+            font-size: 0.9em;
+            white-space: nowrap;
+            padding: 0 8px;
+        }
+        
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+        
+        .file-list-container {
+            width: 50%;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--vscode-panel-border);
+        }
+        
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            background-color: var(--vscode-panel-background);
+        }
+        
+        .preview-container {
+            width: 50%;
+            display: flex;
+            flex-direction: column;
+            background-color: var(--vscode-editor-background);
+        }
+        
+        .preview-header {
+            padding: 8px 12px;
+            background-color: var(--vscode-panel-background);
+            border-bottom: 1px solid var(--vscode-panel-border);
+            font-size: 0.9em;
+            color: var(--vscode-descriptionForeground);
+        }
+        
+        .preview-content {
+            flex: 1;
+            padding: 12px;
+            overflow-y: auto;
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .preview-line {
+            display: block;
+            margin: 0;
+        }
+        
+        .line-number {
+            display: inline-block;
+            width: 40px;
+            color: var(--vscode-editorLineNumber-foreground);
+            text-align: right;
+            margin-right: 12px;
+            user-select: none;
+        }
+        
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 6px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid transparent;
+            min-height: 24px;
+        }
+        
+        .file-item:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        
+        .file-item:focus,
+        .file-item.selected {
+            background-color: var(--vscode-list-activeSelectionBackground);
+            color: var(--vscode-list-activeSelectionForeground);
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
+        }
+        
+        .file-icon {
+            margin-right: 6px;
+            color: var(--vscode-symbolIcon-fileForeground);
+            font-size: 16px;
+            width: 16px;
+            text-align: center;
+        }
+        
+        .file-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        
+        .file-name {
+            font-weight: 400;
+            color: inherit;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.9em;
+        }
+        
+        .no-files {
+            padding: 20px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+        }
+        
+        .no-preview {
+            padding: 20px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+        }
+        
+        /* File type icons */
+        .file-icon.js::before { content: "📄"; }
+        .file-icon.ts::before { content: "🔷"; }
+        .file-icon.tsx::before { content: "🔷"; }
+        .file-icon.jsx::before { content: "📄"; }
+        .file-icon.json::before { content: "📋"; }
+        .file-icon.md::before { content: "📝"; }
+        .file-icon.html::before { content: "🌐"; }
+        .file-icon.css::before { content: "🎨"; }
+        .file-icon.scss::before { content: "🎨"; }
+        .file-icon.py::before { content: "🐍"; }
+        .file-icon.java::before { content: "☕"; }
+        .file-icon.cpp::before { content: "🔧"; }
+        .file-icon.c::before { content: "🔧"; }
+        .file-icon.h::before { content: "🔧"; }
+        .file-icon.default::before { content: "📄"; }
+        
+        /* Scrollbar styling */
+        .file-list::-webkit-scrollbar,
+        .preview-content::-webkit-scrollbar {
+            width: 10px;
+        }
+        
+        .file-list::-webkit-scrollbar-track,
+        .preview-content::-webkit-scrollbar-track {
+            background: var(--vscode-scrollbarSlider-background);
+        }
+        
+        .file-list::-webkit-scrollbar-thumb,
+        .preview-content::-webkit-scrollbar-thumb {
+            background: var(--vscode-scrollbarSlider-background);
+            border-radius: 5px;
+        }
+        
+        .file-list::-webkit-scrollbar-thumb:hover,
+        .preview-content::-webkit-scrollbar-thumb:hover {
+            background: var(--vscode-scrollbarSlider-hoverBackground);
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <div class="search-container">
+            <input type="text" class="search-input" placeholder="Search files..." id="searchInput" />
+        </div>
+        <button class="preview-lines-btn" id="previewLinesBtn" title="Change preview lines">${previewLines} line${previewLines !== 1 ? 's' : ''}</button>
+        <div class="file-count" id="fileCount">${fileItems.length} files</div>
+    </div>
+    
+    <div class="main-content">
+        <div class="file-list-container">
+            <div class="file-list" id="fileList">
+                ${fileItems.map((file, index) => {
+                  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+                  const supportedExts = ['js', 'ts', 'tsx', 'jsx', 'json', 'md', 'html', 'css', 'scss', 'py', 'java', 'cpp', 'c', 'h'];
+                  const iconClass = supportedExts.includes(ext) ? ext : 'default';
+                  return `
+                    <div class="file-item ${index === 0 ? 'selected' : ''}" data-path="${file.path}" data-index="${index}" tabindex="0">
+                        <div class="file-icon ${iconClass}"></div>
+                        <div class="file-info">
+                            <div class="file-name">${file.relativePath}</div>
+                        </div>
+                    </div>
+                  `;
+                }).join('')}
+            </div>
+        </div>
+        
+        <div class="preview-container">
+            <div class="preview-header" id="previewHeader">
+                ${fileItems.length > 0 ? fileItems[0].relativePath : 'No file selected'}
+            </div>
+            <div class="preview-content" id="previewContent">
+                <div class="no-preview">Select a file to see preview</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        let allFiles = ${JSON.stringify(fileItems)};
+        let filteredFiles = [...allFiles];
+        let currentPreviewLines = ${previewLines};
+        let selectedIndex = 0;
+        
+        const searchInput = document.getElementById('searchInput');
+        const fileList = document.getElementById('fileList');
+        const fileCount = document.getElementById('fileCount');
+        const previewHeader = document.getElementById('previewHeader');
+        const previewContent = document.getElementById('previewContent');
+        const previewLinesBtn = document.getElementById('previewLinesBtn');
+        
+        function getFileExtension(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const supportedExts = ['js', 'ts', 'tsx', 'jsx', 'json', 'md', 'html', 'css', 'scss', 'py', 'java', 'cpp', 'c', 'h'];
+            return supportedExts.includes(ext) ? ext : 'default';
+        }
+        
+        function updateFileList(files) {
+            if (files.length === 0) {
+                fileList.innerHTML = '<div class="no-files">No files found matching your search.</div>';
+                fileCount.textContent = '0 files';
+                previewHeader.textContent = 'No file selected';
+                previewContent.innerHTML = '<div class="no-preview">No files found matching your search.</div>';
+                return;
+            }
+            
+            fileList.innerHTML = files.map((file, index) => \`
+                <div class="file-item \${index === selectedIndex ? 'selected' : ''}" data-path="\${file.path}" data-index="\${index}" tabindex="0">
+                    <div class="file-icon \${getFileExtension(file.name)}"></div>
+                    <div class="file-info">
+                        <div class="file-name">\${file.relativePath}</div>
+                    </div>
+                </div>
+            \`).join('');
+            
+            fileCount.textContent = \`\${files.length} file\${files.length !== 1 ? 's' : ''}\`;
+            
+            // Add event listeners to new items
+            addFileItemListeners();
+            
+            // Update preview for selected file
+            if (files[selectedIndex]) {
+                updatePreview(files[selectedIndex]);
+            }
+        }
+        
+        function selectFile(index) {
+            if (index < 0 || index >= filteredFiles.length) return;
+            
+            selectedIndex = index;
+            
+            // Update visual selection
+            document.querySelectorAll('.file-item').forEach((item, i) => {
+                if (i === index) {
+                    item.classList.add('selected');
+                    item.scrollIntoView({ block: 'nearest' });
+                } else {
+                    item.classList.remove('selected');
+                }
+            });
+            
+            // Update preview
+            if (filteredFiles[index]) {
+                updatePreview(filteredFiles[index]);
+            }
+        }
+        
+        function updatePreview(file) {
+            previewHeader.textContent = file.relativePath;
+            previewContent.innerHTML = '<div class="no-preview">Loading preview...</div>';
+            
+            // Request preview from extension
+            vscode.postMessage({
+                command: 'getPreview',
+                filePath: file.path,
+                previewLines: currentPreviewLines
+            });
+        }
+        
+        function addFileItemListeners() {
+            document.querySelectorAll('.file-item').forEach((item, index) => {
+                item.addEventListener('click', () => {
+                    selectFile(index);
+                });
+                
+                item.addEventListener('dblclick', () => {
+                    vscode.postMessage({
+                        command: 'openFile',
+                        filePath: item.dataset.path
+                    });
+                });
+                
+                item.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        vscode.postMessage({
+                            command: 'openFile',
+                            filePath: item.dataset.path
+                        });
+                    }
+                });
+            });
+        }
+        
+        // Preview lines button
+        previewLinesBtn.addEventListener('click', () => {
+            vscode.postMessage({
+                command: 'changePreviewLines'
+            });
+        });
+        
+        // Search functionality with debouncing
+        let searchTimeout;
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                const query = e.target.value.trim();
+                selectedIndex = 0; // Reset selection when searching
+                
+                if (!query) {
+                    filteredFiles = [...allFiles];
+                    updateFileList(filteredFiles);
+                    return;
+                }
+                
+                // Client-side filtering for instant response
+                const lowerQuery = query.toLowerCase();
+                filteredFiles = allFiles.filter(file => 
+                    file.relativePath.toLowerCase().includes(lowerQuery)
+                );
+                
+                updateFileList(filteredFiles);
+                
+                // Also notify extension for more sophisticated filtering if needed
+                vscode.postMessage({
+                    command: 'searchFiles',
+                    query: query
+                });
+            }, 150);
+        });
+        
+        // Keyboard navigation
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (filteredFiles.length > 0) {
+                    selectFile(0);
+                    const firstItem = fileList.querySelector('.file-item');
+                    if (firstItem) firstItem.focus();
+                }
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                vscode.postMessage({ command: 'close' });
+            }
+        });
+        
+        // Handle navigation within file list
+        fileList.addEventListener('keydown', (e) => {
+            const focusedItem = document.activeElement;
+            if (!focusedItem.classList.contains('file-item')) return;
+            
+            const currentIndex = parseInt(focusedItem.dataset.index);
+            
+            switch (e.key) {
+                case 'ArrowDown':
+                    e.preventDefault();
+                    if (currentIndex < filteredFiles.length - 1) {
+                        selectFile(currentIndex + 1);
+                        const nextItem = fileList.children[currentIndex + 1];
+                        if (nextItem) nextItem.focus();
+                    }
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    if (currentIndex > 0) {
+                        selectFile(currentIndex - 1);
+                        const prevItem = fileList.children[currentIndex - 1];
+                        if (prevItem) prevItem.focus();
+                    } else {
+                        searchInput.focus();
+                    }
+                    break;
+                case 'Home':
+                    e.preventDefault();
+                    selectFile(0);
+                    const firstItem = fileList.querySelector('.file-item');
+                    if (firstItem) firstItem.focus();
+                    break;
+                case 'End':
+                    e.preventDefault();
+                    const lastIndex = filteredFiles.length - 1;
+                    selectFile(lastIndex);
+                    const lastItem = fileList.children[lastIndex];
+                    if (lastItem) lastItem.focus();
+                    break;
+            }
+        });
+        
+        // Handle messages from extension
+        window.addEventListener('message', event => {
+            const message = event.data;
+            switch (message.command) {
+                case 'updateFiles':
+                    allFiles = message.files;
+                    selectedIndex = 0; // Reset selection
+                    // If there's a current search, re-apply it
+                    const currentQuery = searchInput.value.trim();
+                    if (currentQuery) {
+                        const lowerQuery = currentQuery.toLowerCase();
+                        filteredFiles = allFiles.filter(file => 
+                            file.relativePath.toLowerCase().includes(lowerQuery)
+                        );
+                    } else {
+                        filteredFiles = [...allFiles];
+                    }
+                    updateFileList(filteredFiles);
+                    break;
+                case 'previewContent':
+                    // Update preview content
+                    if (message.error) {
+                        previewContent.innerHTML = \`<div class="no-preview">Error: \${message.error}</div>\`;
+                    } else if (message.content) {
+                        const lines = message.content.split('\\n');
+                        previewContent.innerHTML = lines.map((line, i) => 
+                            \`<div class="preview-line"><span class="line-number">\${i + 1}</span>\${line || ' '}</div>\`
+                        ).join('');
+                    } else {
+                        previewContent.innerHTML = '<div class="no-preview">(empty file)</div>';
+                    }
+                    break;
+                case 'updatePreviewLines':
+                    currentPreviewLines = message.previewLines;
+                    previewLinesBtn.textContent = \`\${currentPreviewLines} line\${currentPreviewLines !== 1 ? 's' : ''}\`;
+                    // Refresh current preview
+                    if (filteredFiles[selectedIndex]) {
+                        updatePreview(filteredFiles[selectedIndex]);
+                    }
+                    break;
+            }
+        });
+        
+        // Initial setup
+        addFileItemListeners();
+        
+        // Load initial preview if there are files
+        if (filteredFiles.length > 0) {
+            updatePreview(filteredFiles[0]);
+        }
+        
+        // Focus search input
+        searchInput.focus();
+    </script>
+</body>
+</html>`;
 }

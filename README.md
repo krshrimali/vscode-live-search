@@ -42,14 +42,23 @@ Please make sure to have `ripgrep` installed on your system.
 - **Mouse support**: Click to select, double-click to open
 - **Respects preview lines setting** from configuration
 
-### 🚨 Problems Picker (NEW!)
+### 🚨 Problems Picker
 - **Browse all workspace problems/diagnostics** with multi-line preview
 - **Automatic focus** on search field for immediate filtering
 - **Severity icons**: ❌ Errors, ⚠️ Warnings, ℹ️ Info, 💡 Hints
 - **Smart sorting**: Errors first, then warnings, then by file and line
 - **Multi-line context preview** around each problem
-- **Quick navigation**: Click or Enter to jump directly to the problem location
-- **Configurable preview lines** using the existing `previewLines` setting
+
+### 📁 File Picker Tab (NEW!)
+- **Dedicated tab interface** similar to VSCode's Problems tab
+- **Ultra-fast file search** with instant filtering by relative path
+- **Live file preview** with two-pane layout and line numbers
+- **Smart file type icons** for visual file identification
+- **Full relative paths** displayed from workspace root for better context
+- **Persistent tab** that stays open while you work
+- **Full keyboard navigation** with arrow keys and shortcuts
+- **Configurable preview lines** with interactive button to change settings
+- **Real-time file count** display and updates
 
 ### 📄 Result View (CodeLens Style)
 - Shows matches grouped per file
@@ -97,6 +106,11 @@ Please make sure to have `ripgrep` installed on your system.
 {
   "key": "ctrl+shift+m",
   "command": "telescopeLikeSearch.problemsPicker",
+  "when": "!inQuickOpen"
+},
+{
+  "key": "ctrl+shift+o",
+  "command": "telescopeLikeSearch.filePickerTab",
   "when": "!inQuickOpen"
 },
 {
