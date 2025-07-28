@@ -36,6 +36,10 @@
       {
         "command": "telescopeLikeSearch.filePicker",
         "title": "Live Search: File Picker with Preview"
+      },
+      {
+        "command": "telescopeLikeSearch.telescopeWebview",
+        "title": "Live Search: Telescope File Browser"
       }
       
     ],

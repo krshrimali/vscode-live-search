@@ -34,6 +34,14 @@ Please make sure to have `ripgrep` installed on your system.
 - Fuzzy file name and path matching
 - Frecency-based file ranking (most frequently and recently used files first)
 
+### 🔭 Telescope-Style File Browser (NEW!)
+- **Two-sidebar layout** like Neovim's Telescope
+- **Left sidebar**: List of files with fuzzy search
+- **Right sidebar**: File preview with **proper line wrapping**
+- **Keyboard navigation**: Arrow keys, Enter to open, Escape to close
+- **Mouse support**: Click to select, double-click to open
+- **Respects preview lines setting** from configuration
+
 ### 📄 Result View (CodeLens Style)
 - Shows matches grouped per file
 - Each match includes a few lines of context
@@ -63,6 +71,7 @@ Please make sure to have `ripgrep` installed on your system.
 |--------------------------------------------|-------------------------------------------|
 | `Live Search`                  | Opens the search QuickPick                |
 | `Live Search: File Picker with Preview`    | Opens file picker with content preview   |
+| `Live Search: Telescope File Browser`      | Opens telescope-style two-sidebar file browser |
 | `Live Search: Choose Search Scope`         | Shows menu to choose between different search modes |
 
 ---
