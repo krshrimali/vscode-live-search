@@ -6,12 +6,15 @@ The File Picker Tab is a new feature that provides a dedicated tab interface for
 
 - **📋 Dedicated Tab Interface**: Opens in a separate tab that stays open, similar to the Problems tab
 - **🔍 Fast Search**: Instant file filtering as you type with debounced search
+- **👁️ Live File Preview**: Two-pane layout with file list on left and content preview on right
 - **🎯 Smart File Icons**: Visual file type indicators with emoji icons for different file types
 - **⚡ High Performance**: Uses the pre-built file index for ultra-fast file loading
 - **🎨 VSCode-Native Styling**: Matches VSCode's native theme and appearance
 - **⌨️ Full Keyboard Navigation**: Navigate with arrow keys, Enter to open, Escape to close
 - **📊 File Count Display**: Shows the total number of files and filtered results
 - **🔄 Real-time Updates**: Automatically updates when files are added or removed
+- **⚙️ Configurable Preview**: Adjustable number of preview lines (1, 3, 5, 10, or 20 lines)
+- **📋 Line Numbers**: Preview shows line numbers for better code context
 
 ## Usage
 
@@ -34,9 +37,12 @@ The File Picker Tab consists of:
 
 ### Toolbar
 - **Search Input**: Type to filter files instantly
+- **Preview Lines Button**: Click to change the number of preview lines (1, 3, 5, 10, or 20)
 - **File Count**: Shows current number of visible files
 
-### File List
+### Two-Pane Layout
+
+#### Left Pane: File List
 - **File Icons**: Visual indicators for different file types:
   - 📄 JavaScript/JSX files
   - 🔷 TypeScript/TSX files
@@ -49,18 +55,27 @@ The File Picker Tab consists of:
   - 🔧 C/C++/Header files
 - **File Names**: Primary file name display
 - **File Paths**: Relative path from workspace root
+- **Selection Highlighting**: Currently selected file is highlighted
+
+#### Right Pane: File Preview
+- **Preview Header**: Shows the relative path of the selected file
+- **Content Preview**: Displays the file content with syntax highlighting
+- **Line Numbers**: Shows line numbers for better code navigation
+- **Scrollable Content**: Large files can be scrolled within the preview pane
 
 ## Keyboard Navigation
 
 - **Search Field**:
-  - `Arrow Down`: Move to first file in list
+  - `Arrow Down`: Move to first file in list and show its preview
   - `Escape`: Close the tab
   
 - **File List**:
-  - `Arrow Up/Down`: Navigate between files
-  - `Home/End`: Jump to first/last file
-  - `Enter` or `Space`: Open selected file
+  - `Arrow Up/Down`: Navigate between files and update preview in real-time
+  - `Home/End`: Jump to first/last file and show its preview
+  - `Enter` or `Space`: Open selected file in editor
   - `Arrow Up` from first item: Return to search field
+  - `Single Click`: Select file and show preview
+  - `Double Click`: Open file in editor
 
 ## File Type Support
 
@@ -95,8 +110,11 @@ The File Picker Tab recognizes and provides icons for:
 - **Keep it Open**: Unlike quick pickers, this tab stays open for easy file browsing
 - **Fast Navigation**: Use keyboard shortcuts for efficient file navigation
 - **Search Everything**: Search by file name or path - both are indexed
+- **Preview While Browsing**: File content updates instantly as you navigate
+- **Adjust Preview Lines**: Click the preview lines button to change how much content you see
 - **Multiple Tabs**: You can open multiple File Picker Tabs if needed
 - **Theme Matching**: The interface automatically adapts to your VSCode theme
+- **Quick Open**: Double-click or press Enter to open files without closing the tab
 
 ## Comparison with Other Pickers
 
@@ -107,6 +125,8 @@ The File Picker Tab recognizes and provides icons for:
 | Interface | Problems-like | Native Picker | Two-pane |
 | Keyboard Nav | ✅ Full | ✅ Full | ✅ Full |
 | File Icons | ✅ | ❌ | ❌ |
-| Preview | ❌ | ✅ | ✅ |
+| Preview | ✅ Live | ✅ Configurable | ✅ Live |
+| Line Numbers | ✅ | ❌ | ✅ |
+| Preview Lines | ⚙️ Configurable | ⚙️ Configurable | ⚙️ Configurable |
 
 Choose File Picker Tab when you want a persistent, fast file browser that stays open while you work.

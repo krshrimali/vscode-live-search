@@ -52,12 +52,12 @@ Please make sure to have `ripgrep` installed on your system.
 ### 📁 File Picker Tab (NEW!)
 - **Dedicated tab interface** similar to VSCode's Problems tab
 - **Ultra-fast file search** with instant filtering
+- **Live file preview** with two-pane layout and line numbers
 - **Smart file type icons** for visual file identification
 - **Persistent tab** that stays open while you work
 - **Full keyboard navigation** with arrow keys and shortcuts
+- **Configurable preview lines** with interactive button to change settings
 - **Real-time file count** display and updates
-- **Quick navigation**: Click or Enter to jump directly to the problem location
-- **Configurable preview lines** using the existing `previewLines` setting
 
 ### 📄 Result View (CodeLens Style)
 - Shows matches grouped per file
