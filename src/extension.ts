@@ -1120,6 +1120,373 @@ async function showFilePickerWithPreview(context: vscode.ExtensionContext): Prom
   }
 }
 
+// Add this interface after the existing interfaces
+interface TelescopeWebviewItem {
+  label: string;
+  description: string;
+  filePath: string;
+  preview: string;
+}
+
+// Add this function before the activate function
+function getTelescopeWebviewContent(items: TelescopeWebviewItem[], selectedIndex: number = 0): string {
+  const selectedItem = items[selectedIndex] || { preview: 'No file selected' };
+  
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telescope File Search</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            color: var(--vscode-foreground);
+            background-color: var(--vscode-editor-background);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .search-container {
+            padding: 8px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+            background-color: var(--vscode-input-background);
+        }
+        
+        .search-input {
+            width: 100%;
+            padding: 8px;
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 2px;
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+        }
+        
+        .search-input:focus {
+            border-color: var(--vscode-focusBorder);
+        }
+        
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        .file-list {
+            width: 50%;
+            overflow-y: auto;
+            border-right: 1px solid var(--vscode-panel-border);
+            background-color: var(--vscode-sideBar-background);
+        }
+        
+        .file-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid transparent;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .file-item:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        
+        .file-item.selected {
+            background-color: var(--vscode-list-activeSelectionBackground);
+            color: var(--vscode-list-activeSelectionForeground);
+        }
+        
+        .file-name {
+            font-weight: 500;
+            margin-bottom: 2px;
+        }
+        
+        .file-path {
+            font-size: 0.9em;
+            opacity: 0.7;
+        }
+        
+        .preview-panel {
+            width: 50%;
+            padding: 12px;
+            overflow-y: auto;
+            background-color: var(--vscode-editor-background);
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+        }
+        
+        .preview-content {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.4;
+            color: var(--vscode-editor-foreground);
+        }
+        
+        .line-number {
+            display: inline-block;
+            width: 40px;
+            color: var(--vscode-editorLineNumber-foreground);
+            text-align: right;
+            margin-right: 12px;
+            user-select: none;
+        }
+        
+        .preview-line {
+            display: block;
+            margin: 0;
+        }
+        
+        .status-bar {
+            padding: 4px 8px;
+            background-color: var(--vscode-statusBar-background);
+            color: var(--vscode-statusBar-foreground);
+            border-top: 1px solid var(--vscode-panel-border);
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="search-container">
+        <input type="text" class="search-input" placeholder="Search files..." id="searchInput" />
+    </div>
+    
+    <div class="main-container">
+        <div class="file-list" id="fileList">
+            ${items.map((item, index) => `
+                <div class="file-item ${index === selectedIndex ? 'selected' : ''}" data-index="${index}" data-path="${item.filePath}">
+                    <div class="file-name">${item.label}</div>
+                    <div class="file-path">${item.description}</div>
+                </div>
+            `).join('')}
+        </div>
+        
+        <div class="preview-panel">
+            <div class="preview-content" id="previewContent">
+                ${selectedItem.preview.split('\n').map((line, i) => 
+                    `<div class="preview-line"><span class="line-number">${i + 1}</span>${line || ' '}</div>`
+                ).join('')}
+            </div>
+        </div>
+    </div>
+    
+    <div class="status-bar" id="statusBar">
+        ${items.length} files found
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        let currentItems = ${JSON.stringify(items)};
+        let selectedIndex = ${selectedIndex};
+        let filteredItems = [...currentItems];
+        
+        const searchInput = document.getElementById('searchInput');
+        const fileList = document.getElementById('fileList');
+        const previewContent = document.getElementById('previewContent');
+        const statusBar = document.getElementById('statusBar');
+        
+        function updatePreview(item) {
+            if (!item) {
+                previewContent.innerHTML = '<div class="preview-line">No file selected</div>';
+                return;
+            }
+            
+                         const lines = item.preview.split('\\\\n');
+             previewContent.innerHTML = lines.map((line, i) => 
+                 \`<div class="preview-line"><span class="line-number">\${i + 1}</span>\${line || ' '}</div>\`
+             ).join('');
+        }
+        
+        function updateFileList() {
+            fileList.innerHTML = filteredItems.map((item, index) => \`
+                <div class="file-item \${index === selectedIndex ? 'selected' : ''}" data-index="\${index}" data-path="\${item.filePath}">
+                    <div class="file-name">\${item.label}</div>
+                    <div class="file-path">\${item.description}</div>
+                </div>
+            \`).join('');
+            
+            statusBar.textContent = \`\${filteredItems.length} files found\`;
+            
+            // Update preview
+            updatePreview(filteredItems[selectedIndex]);
+            
+            // Add click listeners
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    selectedIndex = parseInt(item.dataset.index);
+                    updateFileList();
+                });
+                
+                item.addEventListener('dblclick', () => {
+                    vscode.postMessage({
+                        command: 'openFile',
+                        filePath: item.dataset.path
+                    });
+                });
+            });
+        }
+        
+        function filterItems(query) {
+            if (!query) {
+                filteredItems = [...currentItems];
+            } else {
+                const lowerQuery = query.toLowerCase();
+                filteredItems = currentItems.filter(item => 
+                    item.label.toLowerCase().includes(lowerQuery) ||
+                    item.description.toLowerCase().includes(lowerQuery)
+                );
+            }
+            selectedIndex = 0;
+            updateFileList();
+        }
+        
+        searchInput.addEventListener('input', (e) => {
+            filterItems(e.target.value);
+        });
+        
+        searchInput.addEventListener('keydown', (e) => {
+            switch(e.key) {
+                case 'ArrowDown':
+                    e.preventDefault();
+                    if (selectedIndex < filteredItems.length - 1) {
+                        selectedIndex++;
+                        updateFileList();
+                    }
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    if (selectedIndex > 0) {
+                        selectedIndex--;
+                        updateFileList();
+                    }
+                    break;
+                case 'Enter':
+                    e.preventDefault();
+                    if (filteredItems[selectedIndex]) {
+                        vscode.postMessage({
+                            command: 'openFile',
+                            filePath: filteredItems[selectedIndex].filePath
+                        });
+                    }
+                    break;
+                case 'Escape':
+                    e.preventDefault();
+                    vscode.postMessage({ command: 'close' });
+                    break;
+            }
+        });
+        
+        // Focus search input
+        searchInput.focus();
+        
+        // Handle messages from extension
+        window.addEventListener('message', event => {
+            const message = event.data;
+            switch (message.command) {
+                case 'updateItems':
+                    currentItems = message.items;
+                    filterItems(searchInput.value);
+                    break;
+            }
+        });
+    </script>
+</body>
+</html>`;
+}
+
+// Telescope webview implementation
+async function showTelescopeWebview(context: vscode.ExtensionContext): Promise<void> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    vscode.window.showErrorMessage('No workspace folder open.');
+    return;
+  }
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading files for telescope view...');
+
+  try {
+    // Get all files
+    const files = await getAllFiles(workspaceFolder);
+    const searchConfig = getSearchConfig();
+    const previewLines = searchConfig.previewLines;
+    
+    outputChannel.appendLine(`[Telescope Webview] File candidate count: ${files.length}`);
+
+    // Get top frecency files
+    const topFiles = getTopFrecencyFiles(context, files);
+    
+    // Build telescope items with preview
+    const telescopeItems: TelescopeWebviewItem[] = await Promise.all(
+      topFiles.map(async (file) => {
+        const relativePath = path.relative(workspaceFolder!, file);
+        const fileName = path.basename(file);
+        const fileDir = path.dirname(relativePath);
+        const preview = await getFilePreview(file, previewLines);
+        
+        return {
+          label: fileName,
+          description: fileDir === '.' ? '' : fileDir,
+          filePath: file,
+          preview: preview
+        };
+      })
+    );
+
+    outputChannel.appendLine(`[Telescope Webview] Showing ${telescopeItems.length} files in webview.`);
+
+    // Create and show webview panel
+    const panel = vscode.window.createWebviewPanel(
+      'telescopeWebview',
+      'Telescope File Browser',
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        localResourceRoots: [context.extensionUri],
+        retainContextWhenHidden: true
+      }
+    );
+
+    panel.webview.html = getTelescopeWebviewContent(telescopeItems);
+
+    // Handle messages from webview
+    panel.webview.onDidReceiveMessage(
+      async (message) => {
+        switch (message.command) {
+          case 'openFile':
+            try {
+              await updateFileUsage(context, message.filePath);
+              const document = await vscode.workspace.openTextDocument(message.filePath);
+              await vscode.window.showTextDocument(document);
+              panel.dispose();
+            } catch (error) {
+              vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+            }
+            break;
+          case 'close':
+            panel.dispose();
+            break;
+        }
+      },
+      undefined,
+      context.subscriptions
+    );
+
+  } catch (error) {
+    vscode.window.showErrorMessage(`Failed to load telescope view: ${error}`);
+    outputChannel.appendLine(`[Telescope Webview] Error: ${error}`);
+  } finally {
+    loadingMessage.dispose();
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
@@ -1490,6 +1857,12 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.telescopeWebview', async () => {
+      await showTelescopeWebview(context);
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.chooseScope', async () => {
       const options = [
         {
@@ -1511,6 +1884,11 @@ export async function activate(context: vscode.ExtensionContext) {
           label: 'File picker with preview',
           description: 'Browse and open files with content preview',
           command: 'telescopeLikeSearch.filePicker'
+        },
+        {
+          label: 'Telescope-style file browser',
+          description: 'Browse files with two-sidebar layout and line wrapping',
+          command: 'telescopeLikeSearch.telescopeWebview'
         }
       ];
       const selected = await vscode.window.showQuickPick(options, {
