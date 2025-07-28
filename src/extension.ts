@@ -16,12 +16,25 @@ interface FileQuickPickItem extends vscode.QuickPickItem {
   filePath: string;
 }
 
+// Cache for search results
+interface CacheEntry {
+  query: string;
+  folder: string;
+  results: SearchResult[];
+  timestamp: number;
+}
+
+const searchCache = new Map<string, CacheEntry>();
+const CACHE_TTL = 30000; // 30 seconds
+const MAX_CACHE_SIZE = 50;
+
 let lastSearchResults: SearchResult[] = [];
 let workspaceFolder: string | undefined;
 let lastSearchFolder: string | undefined;
 const PREVIEW_LINE_CONTEXT = 2;
 const MAX_SEARCH_RESULTS = 300;
-const SEARCH_DEBOUNCE_MS = 300;
+const SEARCH_DEBOUNCE_MS = 150; // Reduced for faster response
+const STREAM_UPDATE_INTERVAL = 100; // Update UI every 100ms during streaming
 
 // Configuration for search scope
 interface SearchConfig {
@@ -30,6 +43,45 @@ interface SearchConfig {
   maxFileSize: number;
   recentFolders: string[];
   maxItemsInPicker: number;
+}
+
+// Cache management functions
+function getCacheKey(query: string, folder: string): string {
+  return `${query}:${folder}`;
+}
+
+function getCachedResults(query: string, folder: string): SearchResult[] | null {
+  const key = getCacheKey(query, folder);
+  const entry = searchCache.get(key);
+  
+  if (!entry) return null;
+  
+  // Check if cache is still valid
+  if (Date.now() - entry.timestamp > CACHE_TTL) {
+    searchCache.delete(key);
+    return null;
+  }
+  
+  return entry.results;
+}
+
+function setCachedResults(query: string, folder: string, results: SearchResult[]): void {
+  // Clean old entries if cache is full
+  if (searchCache.size >= MAX_CACHE_SIZE) {
+    const oldest = Array.from(searchCache.entries())
+      .sort(([,a], [,b]) => a.timestamp - b.timestamp)[0];
+    if (oldest) {
+      searchCache.delete(oldest[0]);
+    }
+  }
+  
+  const key = getCacheKey(query, folder);
+  searchCache.set(key, {
+    query,
+    folder,
+    results,
+    timestamp: Date.now()
+  });
 }
 
 function getSearchConfig(): SearchConfig {
@@ -711,99 +763,116 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
       return;
     }
 
+    // Check cache first
+    const cacheKey = `file:${selectedFile}:${query}`;
+    const cached = getCachedResults(query, cacheKey);
+    if (cached) {
+      quickPick.items = cached.length > 0 ? cached : [{ label: 'No matches found', description: '', filePath: '', line: -1, text: '' }];
+      quickPick.busy = false;
+      outputChannel.appendLine(`[Live Search] Using cached results: ${cached.length} items`);
+      return;
+    }
+
     quickPick.busy = true;
-    let buffer = '';
     outputChannel.appendLine(`[Live Search] Running ripgrep in file: ${selectedFile} | Query: "${query}"`);
 
-    // Split the file into chunks for parallel processing
-    const CHUNK_SIZE = 1000; // Number of lines per chunk
-    const chunks: string[] = [];
-    let currentChunk = '';
-    let lineCount = 0;
+    const ripgrepArgs = [
+      '--vimgrep',
+      '--smart-case',
+      '--no-heading',
+      '--color', 'never',
+      '--text',
+      '--line-number',
+      '--max-count', MAX_SEARCH_RESULTS.toString(),
+      query,
+      selectedFile
+    ];
 
-    const processChunk = async (chunk: string, startLine: number): Promise<SearchResult[]> => {
-      const ripgrepArgs = [
-        '--vimgrep',
-        '--smart-case',
-        '--no-heading',
-        '--color', 'never',
-        '--text',
-        '--line-number',
-        '--with-filename',
-        query,
-        '-'
-      ];
+    currentProcess = spawn('rg', ripgrepArgs, { 
+      cwd: workspaceFolder
+    });
 
-      return new Promise((resolve) => {
-        const process: ReturnType<typeof spawn> = spawn('rg', ripgrepArgs, { 
-          cwd: workspaceFolder
-        });
+    const results: SearchResult[] = [];
+    let buffer = '';
+    let updateTimer: NodeJS.Timeout | null = null;
 
-        let chunkBuffer = '';
-        if (process.stdout) {
-          process.stdout.on('data', (data) => chunkBuffer += data.toString());
-        }
-
-        process.on('close', () => {
-          const lines = chunkBuffer.split('\n');
-          const results: SearchResult[] = [];
-
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
-            if (match) {
-              const [, file, lineNum, text] = match;
-              results.push({
-                label: `Line ${lineNum}`,
-                description: text.trim(),
-                filePath: file,
-                line: parseInt(lineNum, 10) - 1,
-                text: text.trim()
-              });
-            }
-          }
-          resolve(results);
-        });
-
-        process.stdin?.write(chunk);
-        process.stdin?.end();
-      });
+    // Stream results for better UX
+    const updateUI = () => {
+      if (results.length > 0) {
+        quickPick.items = results;
+      }
     };
 
-    // Read file in chunks and process them
-    const fileStream = fs.createReadStream(selectedFile, { encoding: 'utf8' });
-    const rl = require('readline').createInterface({
-      input: fileStream,
-      crlfDelay: Infinity
-    });
+    if (currentProcess.stdout) {
+      currentProcess.stdout.on('data', (data) => {
+        buffer += data.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep the incomplete line in buffer
 
-    rl.on('line', (line: string) => {
-      currentChunk += line + '\n';
-      lineCount++;
-      
-      if (lineCount >= CHUNK_SIZE) {
-        chunks.push(currentChunk);
-        currentChunk = '';
-        lineCount = 0;
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+          if (match) {
+            const [, file, lineNum, text] = match;
+            const trimmedText = text.trim();
+            results.push({
+              label: `Line ${lineNum}`,
+              description: trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText,
+              detail: `${path.basename(file)} (Line ${lineNum})`,
+              filePath: file,
+              line: parseInt(lineNum, 10) - 1,
+              text: trimmedText
+            });
+          }
+        }
+
+        // Throttled UI updates for better performance
+        if (!updateTimer) {
+          updateTimer = setTimeout(() => {
+            updateUI();
+            updateTimer = null;
+          }, STREAM_UPDATE_INTERVAL);
+        }
+      });
+    }
+
+    if (currentProcess.stderr) {
+      currentProcess.stderr.on('data', (data) => {
+        outputChannel.appendLine(`[Live Search] Error: ${data.toString()}`);
+      });
+    }
+
+    currentProcess.on('close', (code) => {
+      if (updateTimer) {
+        clearTimeout(updateTimer);
+        updateTimer = null;
       }
-    });
 
-    rl.on('close', async () => {
-      if (currentChunk) {
-        chunks.push(currentChunk);
+      // Process any remaining buffer
+      if (buffer.trim()) {
+        const match = buffer.match(/^(.+?):(\d+):\d+:(.*)$/);
+        if (match) {
+          const [, file, lineNum, text] = match;
+          const trimmedText = text.trim();
+          results.push({
+            label: `Line ${lineNum}`,
+            description: trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText,
+            detail: `${path.basename(file)} (Line ${lineNum})`,
+            filePath: file,
+            line: parseInt(lineNum, 10) - 1,
+            text: trimmedText
+          });
+        }
       }
 
-      // Process chunks in parallel
-      const chunkResults = await Promise.all(
-        chunks.map((chunk, index) => 
-          processChunk(chunk, index * CHUNK_SIZE)
-        )
-      );
-
-      // Combine and sort results
-      const results = chunkResults.flat().sort((a, b) => a.line - b.line);
+      // Sort results by line number
+      results.sort((a, b) => a.line - b.line);
       lastSearchResults = results;
-      outputChannel.appendLine(`[Live Search] Search complete. Results: ${results.length}`);
+      
+      // Cache results
+      setCachedResults(query, cacheKey, results);
+      
+      outputChannel.appendLine(`[Live Search] Search complete. Results: ${results.length}, Exit code: ${code}`);
 
       quickPick.items = results.length > 0
         ? results
@@ -811,13 +880,19 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
       quickPick.busy = false;
     });
 
-    // Set a timeout to show results even if some chunks are still processing
+    currentProcess.on('error', (error) => {
+      outputChannel.appendLine(`[Live Search] Process error: ${error.message}`);
+      quickPick.busy = false;
+      quickPick.items = [{ label: 'Search error occurred', description: error.message, filePath: '', line: -1, text: '' }];
+    });
+
+    // Set a timeout to show results even if search is taking too long
     searchTimeout = setTimeout(() => {
-      if (quickPick.busy) {
-        quickPick.busy = false;
-        outputChannel.appendLine('[Live Search] Search timed out, showing partial results.');
+      if (quickPick.busy && results.length > 0) {
+        updateUI();
+        outputChannel.appendLine('[Live Search] Search taking too long, showing partial results.');
       }
-    }, 5000); // 5 second timeout
+    }, 3000); // 3 second timeout for partial results
   };
 
   const debouncedSearch = debounce(runRipgrep, SEARCH_DEBOUNCE_MS);
@@ -847,6 +922,37 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
   quickPick.show();
 }
 
+// Clear cache when files change to ensure freshness
+function setupCacheInvalidation(context: vscode.ExtensionContext) {
+  const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, false, false);
+  
+  watcher.onDidChange(() => {
+    // Clear cache when files are modified
+    if (searchCache.size > 0) {
+      searchCache.clear();
+      outputChannel.appendLine('[Live Search] Cache cleared due to file changes');
+    }
+  });
+  
+  watcher.onDidCreate(() => {
+    // Clear cache when files are created
+    if (searchCache.size > 0) {
+      searchCache.clear();
+      outputChannel.appendLine('[Live Search] Cache cleared due to new files');
+    }
+  });
+  
+  watcher.onDidDelete(() => {
+    // Clear cache when files are deleted
+    if (searchCache.size > 0) {
+      searchCache.clear();
+      outputChannel.appendLine('[Live Search] Cache cleared due to file deletions');
+    }
+  });
+  
+  context.subscriptions.push(watcher);
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   let lastQuickPick: vscode.QuickPick<SearchResult> | undefined;
 
@@ -854,6 +960,9 @@ export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('Live Search');
   debugChannel = vscode.window.createOutputChannel('Live Search Debug');
   outputChannel.appendLine('[Live Search] Extension activated.');
+  
+  // Setup cache invalidation
+  setupCacheInvalidation(context);
 
   // Status bar icon
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -1014,8 +1123,17 @@ export async function activate(context: vscode.ExtensionContext) {
           return;
         }
 
+        // Check cache first
+        const searchFolder = lastSearchFolder || workspaceFolder!;
+        const cached = getCachedResults(query, searchFolder);
+        if (cached) {
+          quickPick.items = cached.length > 0 ? cached : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
+          quickPick.busy = false;
+          outputChannel.appendLine(`[Live Search] Using cached results: ${cached.length} items`);
+          return;
+        }
+
         quickPick.busy = true;
-        let buffer = '';
 
         const searchConfig = getSearchConfig();
         const ripgrepArgs = [
@@ -1028,7 +1146,7 @@ export async function activate(context: vscode.ExtensionContext) {
           '--text',
           '--max-filesize', searchConfig.maxFileSize.toString(),
           query,
-          workspaceFolder!
+          searchFolder
         ];
 
         // Add include/exclude patterns
@@ -1043,55 +1161,125 @@ export async function activate(context: vscode.ExtensionContext) {
           cwd: workspaceFolder
         });
 
+        const results: SearchResult[] = [];
+        let buffer = '';
+        let updateTimer: NodeJS.Timeout | null = null;
+
+        // Stream results for better UX
+        const updateUI = () => {
+          if (results.length > 0) {
+            // Sort by relevance before showing
+            results.sort((a, b) => {
+              const score = (res: SearchResult): number => {
+                const fileDepth = res.filePath.split(path.sep).length;
+                const startMatch = res.text.toLowerCase().startsWith(query.toLowerCase()) ? 100 : 0;
+                const substringMatch = res.text.toLowerCase().includes(query.toLowerCase()) ? 50 : 0;
+                const wordCount = (res.text.toLowerCase().match(new RegExp(query.toLowerCase(), 'g')) || []).length;
+                const lineScore = Math.max(30 - res.line, 0);
+                const filePathScore = Math.max(20 - fileDepth, 0);
+                return startMatch + substringMatch + wordCount * 10 + lineScore + filePathScore;
+              };
+              return score(b) - score(a);
+            });
+            quickPick.items = results;
+          }
+        };
+
         if (currentProcess.stdout) {
-          currentProcess.stdout.on('data', (data) => buffer += data.toString());
+          currentProcess.stdout.on('data', (data) => {
+            buffer += data.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || ''; // Keep the incomplete line in buffer
+
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+              if (match) {
+                const [, file, lineNum, text] = match;
+                const trimmedText = text.trim();
+                const relativePath = path.relative(workspaceFolder!, file);
+                results.push({
+                  label: `${relativePath}:${lineNum}`,
+                  description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
+                  detail: `${file} (Line ${lineNum})`,
+                  filePath: file,
+                  line: parseInt(lineNum, 10) - 1,
+                  text: trimmedText
+                });
+              }
+            }
+
+            // Throttled UI updates for better performance
+            if (!updateTimer) {
+              updateTimer = setTimeout(() => {
+                updateUI();
+                updateTimer = null;
+              }, STREAM_UPDATE_INTERVAL);
+            }
+          });
         }
 
-        currentProcess.on('close', () => {
-          const lines = buffer.split('\n');
-          const results: SearchResult[] = [];
-          const processedFiles = new Set<string>();
+        if (currentProcess.stderr) {
+          currentProcess.stderr.on('data', (data) => {
+            outputChannel.appendLine(`[Live Search] Error: ${data.toString()}`);
+          });
+        }
 
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const match = line.match(/^(.+?):(\d+):\d+:(.*)$/);
+        currentProcess.on('close', (code) => {
+          if (updateTimer) {
+            clearTimeout(updateTimer);
+            updateTimer = null;
+          }
+
+          // Process any remaining buffer
+          if (buffer.trim()) {
+            const match = buffer.match(/^(.+?):(\d+):\d+:(.*)$/);
             if (match) {
               const [, file, lineNum, text] = match;
-              if (processedFiles.has(file)) continue;
-              processedFiles.add(file);
-
+              const trimmedText = text.trim();
+              const relativePath = path.relative(workspaceFolder!, file);
               results.push({
-                label: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
-                description: text.trim(),
-                detail: file,
+                label: `${relativePath}:${lineNum}`,
+                description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
+                detail: `${file} (Line ${lineNum})`,
                 filePath: file,
                 line: parseInt(lineNum, 10) - 1,
-                text: text.trim()
+                text: trimmedText
               });
             }
           }
 
-          // Heuristic sorting by relevance
+          // Final sort by relevance
           results.sort((a, b) => {
             const score = (res: SearchResult): number => {
               const fileDepth = res.filePath.split(path.sep).length;
               const startMatch = res.text.toLowerCase().startsWith(query.toLowerCase()) ? 100 : 0;
               const substringMatch = res.text.toLowerCase().includes(query.toLowerCase()) ? 50 : 0;
-              const wordCount =  (res.text.toLowerCase().match(new RegExp(query.toLowerCase(), 'g')) || []).length;
+              const wordCount = (res.text.toLowerCase().match(new RegExp(query.toLowerCase(), 'g')) || []).length;
               const lineScore = Math.max(30 - res.line, 0);
               const filePathScore = Math.max(20 - fileDepth, 0);
               return startMatch + substringMatch + wordCount * 10 + lineScore + filePathScore;
             };
-
             return score(b) - score(a);
           });
 
           lastSearchResults = results;
+          
+          // Cache results
+          setCachedResults(query, searchFolder, results);
+          
+          outputChannel.appendLine(`[Live Search] Search complete. Results: ${results.length}, Exit code: ${code}`);
 
           quickPick.items = results.length > 0
             ? results
             : [{ label: 'No matches found', description: '', detail: '', filePath: '', line: -1, text: '' }];
           quickPick.busy = false;
+        });
+
+        currentProcess.on('error', (error) => {
+          outputChannel.appendLine(`[Live Search] Process error: ${error.message}`);
+          quickPick.busy = false;
+          quickPick.items = [{ label: 'Search error occurred', description: error.message, detail: '', filePath: '', line: -1, text: '' }];
         });
       };
 
@@ -1117,6 +1305,14 @@ export async function activate(context: vscode.ExtensionContext) {
       });
       
       quickPick.show();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.clearCache', async () => {
+      searchCache.clear();
+      vscode.window.showInformationMessage(`Live Search: Cache cleared (${searchCache.size} entries removed)`);
+      outputChannel.appendLine('[Live Search] Cache manually cleared');
     })
   );
 

@@ -28,6 +28,10 @@
       {
         "command": "telescopeLikeSearch.chooseScope",
         "title": "Live Search: Choose Search Scope"
+      },
+      {
+        "command": "telescopeLikeSearch.clearCache",
+        "title": "Live Search: Clear Cache"
       }
     ],
     "keybindings": [
