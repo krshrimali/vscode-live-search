@@ -34,13 +34,22 @@ Please make sure to have `ripgrep` installed on your system.
 - Fuzzy file name and path matching
 - Frecency-based file ranking (most frequently and recently used files first)
 
-### 🔭 Telescope-Style File Browser (NEW!)
+### 🔭 Telescope-Style File Browser
 - **Two-sidebar layout** like Neovim's Telescope
 - **Left sidebar**: List of files with fuzzy search
 - **Right sidebar**: File preview with **proper line wrapping**
 - **Keyboard navigation**: Arrow keys, Enter to open, Escape to close
 - **Mouse support**: Click to select, double-click to open
 - **Respects preview lines setting** from configuration
+
+### 🚨 Problems Picker (NEW!)
+- **Browse all workspace problems/diagnostics** with multi-line preview
+- **Automatic focus** on search field for immediate filtering
+- **Severity icons**: ❌ Errors, ⚠️ Warnings, ℹ️ Info, 💡 Hints
+- **Smart sorting**: Errors first, then warnings, then by file and line
+- **Multi-line context preview** around each problem
+- **Quick navigation**: Click or Enter to jump directly to the problem location
+- **Configurable preview lines** using the existing `previewLines` setting
 
 ### 📄 Result View (CodeLens Style)
 - Shows matches grouped per file
@@ -72,6 +81,7 @@ Please make sure to have `ripgrep` installed on your system.
 | `Live Search`                  | Opens the search QuickPick                |
 | `Live Search: File Picker with Preview`    | Opens file picker with content preview   |
 | `Live Search: Telescope File Browser`      | Opens telescope-style two-sidebar file browser |
+| `Live Search: Problems Picker`             | Opens problems/diagnostics picker with preview |
 | `Live Search: Choose Search Scope`         | Shows menu to choose between different search modes |
 
 ---
@@ -82,6 +92,11 @@ Please make sure to have `ripgrep` installed on your system.
 {
   "key": "ctrl+p",
   "command": "telescopeLikeSearch.filePicker",
+  "when": "!inQuickOpen"
+},
+{
+  "key": "ctrl+shift+m",
+  "command": "telescopeLikeSearch.problemsPicker",
   "when": "!inQuickOpen"
 },
 {
