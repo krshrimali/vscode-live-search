@@ -2666,9 +2666,8 @@ function filterFiles(files: string[], query: string, workspaceRoot: string): Arr
   return files
     .filter(file => {
       const relativePath = path.relative(workspaceRoot, file);
-      const fileName = path.basename(file);
-      return relativePath.toLowerCase().includes(lowerQuery) || 
-             fileName.toLowerCase().includes(lowerQuery);
+      // Search in the relative path primarily, as that's what users will see
+      return relativePath.toLowerCase().includes(lowerQuery);
     })
     .map(file => ({
       path: file,
@@ -2826,10 +2825,10 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
         .file-item {
             display: flex;
             align-items: center;
-            padding: 4px 12px;
+            padding: 6px 12px;
             cursor: pointer;
             border-bottom: 1px solid transparent;
-            min-height: 22px;
+            min-height: 24px;
         }
         
         .file-item:hover {
@@ -2865,15 +2864,7 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-        }
-        
-        .file-path {
-            font-size: 0.85em;
-            color: var(--vscode-descriptionForeground);
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            margin-top: 1px;
+            font-size: 0.9em;
         }
         
         .no-files {
@@ -2950,8 +2941,7 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
                     <div class="file-item ${index === 0 ? 'selected' : ''}" data-path="${file.path}" data-index="${index}" tabindex="0">
                         <div class="file-icon ${iconClass}"></div>
                         <div class="file-info">
-                            <div class="file-name">${file.name}</div>
-                            ${file.directory ? `<div class="file-path">${file.directory}</div>` : ''}
+                            <div class="file-name">${file.relativePath}</div>
                         </div>
                     </div>
                   `;
@@ -3002,8 +2992,7 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
                 <div class="file-item \${index === selectedIndex ? 'selected' : ''}" data-path="\${file.path}" data-index="\${index}" tabindex="0">
                     <div class="file-icon \${getFileExtension(file.name)}"></div>
                     <div class="file-info">
-                        <div class="file-name">\${file.name}</div>
-                        \${file.directory ? \`<div class="file-path">\${file.directory}</div>\` : ''}
+                        <div class="file-name">\${file.relativePath}</div>
                     </div>
                 </div>
             \`).join('');
@@ -3101,7 +3090,6 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
                 // Client-side filtering for instant response
                 const lowerQuery = query.toLowerCase();
                 filteredFiles = allFiles.filter(file => 
-                    file.name.toLowerCase().includes(lowerQuery) ||
                     file.relativePath.toLowerCase().includes(lowerQuery)
                 );
                 
@@ -3184,7 +3172,6 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
                     if (currentQuery) {
                         const lowerQuery = currentQuery.toLowerCase();
                         filteredFiles = allFiles.filter(file => 
-                            file.name.toLowerCase().includes(lowerQuery) ||
                             file.relativePath.toLowerCase().includes(lowerQuery)
                         );
                     } else {

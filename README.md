@@ -51,9 +51,10 @@ Please make sure to have `ripgrep` installed on your system.
 
 ### 📁 File Picker Tab (NEW!)
 - **Dedicated tab interface** similar to VSCode's Problems tab
-- **Ultra-fast file search** with instant filtering
+- **Ultra-fast file search** with instant filtering by relative path
 - **Live file preview** with two-pane layout and line numbers
 - **Smart file type icons** for visual file identification
+- **Full relative paths** displayed from workspace root for better context
 - **Persistent tab** that stays open while you work
 - **Full keyboard navigation** with arrow keys and shortcuts
 - **Configurable preview lines** with interactive button to change settings

@@ -53,8 +53,7 @@ The File Picker Tab consists of:
   - 🐍 Python files
   - ☕ Java files
   - 🔧 C/C++/Header files
-- **File Names**: Primary file name display
-- **File Paths**: Relative path from workspace root
+- **Relative Paths**: Shows full relative paths from workspace root (e.g., `src/components/Button.tsx`)
 - **Selection Highlighting**: Currently selected file is highlighted
 
 #### Right Pane: File Preview
@@ -109,12 +108,13 @@ The File Picker Tab recognizes and provides icons for:
 
 - **Keep it Open**: Unlike quick pickers, this tab stays open for easy file browsing
 - **Fast Navigation**: Use keyboard shortcuts for efficient file navigation
-- **Search Everything**: Search by file name or path - both are indexed
+- **Search by Path**: Search matches against the full relative path from workspace root
 - **Preview While Browsing**: File content updates instantly as you navigate
 - **Adjust Preview Lines**: Click the preview lines button to change how much content you see
 - **Multiple Tabs**: You can open multiple File Picker Tabs if needed
 - **Theme Matching**: The interface automatically adapts to your VSCode theme
 - **Quick Open**: Double-click or press Enter to open files without closing the tab
+- **Path Context**: Full relative paths help you understand file locations at a glance
 
 ## Comparison with Other Pickers
 
