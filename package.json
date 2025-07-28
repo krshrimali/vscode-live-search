@@ -44,6 +44,10 @@
       {
         "command": "telescopeLikeSearch.problemsPicker",
         "title": "Live Search: Problems Picker"
+      },
+      {
+        "command": "telescopeLikeSearch.filePickerTab",
+        "title": "Live Search: File Picker Tab"
       }
       
     ],
@@ -81,6 +85,11 @@
       {
         "key": "ctrl+shift+m",
         "command": "telescopeLikeSearch.problemsPicker",
+        "when": "!inQuickOpen"
+      },
+      {
+        "key": "ctrl+shift+o",
+        "command": "telescopeLikeSearch.filePickerTab",
         "when": "!inQuickOpen"
       }
     ],

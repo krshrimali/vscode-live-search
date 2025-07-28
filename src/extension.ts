@@ -2458,6 +2458,11 @@ export async function activate(context: vscode.ExtensionContext) {
           label: 'Problems picker',
           description: 'Browse and navigate to problems/diagnostics with preview',
           command: 'telescopeLikeSearch.problemsPicker'
+        },
+        {
+          label: 'File picker tab',
+          description: 'Browse files in a dedicated tab similar to Problems tab',
+          command: 'telescopeLikeSearch.filePickerTab'
         }
       ];
       const selected = await vscode.window.showQuickPick(options, {
@@ -2473,6 +2478,12 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('telescopeLikeSearch.problemsPicker', async () => {
       await showProblemsPicker(context);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('telescopeLikeSearch.filePickerTab', async () => {
+      await showFilePickerTab(context);
     })
   );
 }
@@ -2518,4 +2529,476 @@ function getGitignorePatterns(): string[] {
   } catch {
     return [];
   }
+}
+
+// File picker tab webview implementation - similar to Problems tab
+async function showFilePickerTab(context: vscode.ExtensionContext): Promise<void> {
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  if (!workspaceFolders || workspaceFolders.length === 0) {
+    vscode.window.showErrorMessage('No workspace folder open.');
+    return;
+  }
+  workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+  // Show loading indicator
+  const loadingMessage = vscode.window.setStatusBarMessage('Loading files for file picker tab...');
+
+  try {
+    // Get all files using the fast file index
+    let files: string[] = [];
+    if (workspaceFileIndex) {
+      files = await workspaceFileIndex.getFiles();
+    } else {
+      files = await getAllFiles(workspaceFolder);
+    }
+    
+    outputChannel.appendLine(`[File Picker Tab] Loaded ${files.length} files`);
+
+    // Create and show webview panel
+    const panel = vscode.window.createWebviewPanel(
+      'filePickerTab',
+      'File Picker',
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        localResourceRoots: [context.extensionUri],
+        retainContextWhenHidden: true
+      }
+    );
+
+    panel.webview.html = getFilePickerTabContent(files, workspaceFolder);
+
+    // Handle messages from webview
+    panel.webview.onDidReceiveMessage(
+      async (message) => {
+        switch (message.command) {
+          case 'openFile':
+            try {
+              await updateFileUsage(context, message.filePath);
+              const document = await vscode.workspace.openTextDocument(message.filePath);
+              await vscode.window.showTextDocument(document);
+              // Don't dispose panel - keep it open like Problems tab
+            } catch (error) {
+              vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+            }
+            break;
+                     case 'searchFiles':
+             // Handle real-time search
+             if (workspaceFolder) {
+               const filteredFiles = filterFiles(files, message.query, workspaceFolder);
+               panel.webview.postMessage({
+                 command: 'updateFiles',
+                 files: filteredFiles
+               });
+             }
+             break;
+          case 'close':
+            panel.dispose();
+            break;
+        }
+      },
+      undefined,
+      context.subscriptions
+    );
+
+    outputChannel.appendLine(`[File Picker Tab] File picker tab opened with ${files.length} files`);
+
+  } catch (error) {
+    vscode.window.showErrorMessage(`Failed to load file picker tab: ${error}`);
+    outputChannel.appendLine(`[File Picker Tab] Error: ${error}`);
+  } finally {
+    loadingMessage.dispose();
+  }
+}
+
+// Helper function to filter files based on search query
+function filterFiles(files: string[], query: string, workspaceRoot: string): Array<{path: string, relativePath: string, name: string}> {
+  if (!query) {
+    // Return all files with basic info
+    return files.map(file => ({
+      path: file,
+      relativePath: path.relative(workspaceRoot, file),
+      name: path.basename(file)
+    }));
+  }
+
+  const lowerQuery = query.toLowerCase();
+  return files
+    .filter(file => {
+      const relativePath = path.relative(workspaceRoot, file);
+      const fileName = path.basename(file);
+      return relativePath.toLowerCase().includes(lowerQuery) || 
+             fileName.toLowerCase().includes(lowerQuery);
+    })
+    .map(file => ({
+      path: file,
+      relativePath: path.relative(workspaceRoot, file),
+      name: path.basename(file)
+    }))
+    .slice(0, 1000); // Limit results for performance
+}
+
+// Generate HTML content for file picker tab (Problems tab style)
+function getFilePickerTabContent(files: string[], workspaceRoot: string): string {
+  const fileItems = files.slice(0, 1000).map(file => {
+    const relativePath = path.relative(workspaceRoot, file);
+    const fileName = path.basename(file);
+    const fileDir = path.dirname(relativePath);
+    
+    return {
+      path: file,
+      relativePath: relativePath,
+      name: fileName,
+      directory: fileDir === '.' ? '' : fileDir
+    };
+  });
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Picker</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            color: var(--vscode-foreground);
+            background-color: var(--vscode-panel-background);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .toolbar {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background-color: var(--vscode-panel-background);
+            border-bottom: 1px solid var(--vscode-panel-border);
+            gap: 8px;
+        }
+        
+        .search-container {
+            flex: 1;
+            position: relative;
+        }
+        
+        .search-input {
+            width: 100%;
+            padding: 4px 8px;
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 2px;
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+        }
+        
+        .search-input:focus {
+            border-color: var(--vscode-focusBorder);
+        }
+        
+        .file-count {
+            color: var(--vscode-descriptionForeground);
+            font-size: 0.9em;
+            white-space: nowrap;
+            padding: 0 8px;
+        }
+        
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            background-color: var(--vscode-panel-background);
+        }
+        
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 4px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid transparent;
+            min-height: 22px;
+        }
+        
+        .file-item:hover {
+            background-color: var(--vscode-list-hoverBackground);
+        }
+        
+        .file-item:focus {
+            outline: 1px solid var(--vscode-focusBorder);
+            outline-offset: -1px;
+        }
+        
+        .file-icon {
+            margin-right: 6px;
+            color: var(--vscode-symbolIcon-fileForeground);
+            font-size: 16px;
+            width: 16px;
+            text-align: center;
+        }
+        
+        .file-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        
+        .file-name {
+            font-weight: 400;
+            color: var(--vscode-foreground);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .file-path {
+            font-size: 0.85em;
+            color: var(--vscode-descriptionForeground);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-top: 1px;
+        }
+        
+        .no-files {
+            padding: 20px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+            font-style: italic;
+        }
+        
+        /* File type icons */
+        .file-icon.js::before { content: "📄"; }
+        .file-icon.ts::before { content: "🔷"; }
+        .file-icon.tsx::before { content: "🔷"; }
+        .file-icon.jsx::before { content: "📄"; }
+        .file-icon.json::before { content: "📋"; }
+        .file-icon.md::before { content: "📝"; }
+        .file-icon.html::before { content: "🌐"; }
+        .file-icon.css::before { content: "🎨"; }
+        .file-icon.scss::before { content: "🎨"; }
+        .file-icon.py::before { content: "🐍"; }
+        .file-icon.java::before { content: "☕"; }
+        .file-icon.cpp::before { content: "🔧"; }
+        .file-icon.c::before { content: "🔧"; }
+        .file-icon.h::before { content: "🔧"; }
+        .file-icon.default::before { content: "📄"; }
+        
+        /* Scrollbar styling */
+        .file-list::-webkit-scrollbar {
+            width: 10px;
+        }
+        
+        .file-list::-webkit-scrollbar-track {
+            background: var(--vscode-scrollbarSlider-background);
+        }
+        
+        .file-list::-webkit-scrollbar-thumb {
+            background: var(--vscode-scrollbarSlider-background);
+            border-radius: 5px;
+        }
+        
+        .file-list::-webkit-scrollbar-thumb:hover {
+            background: var(--vscode-scrollbarSlider-hoverBackground);
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <div class="search-container">
+            <input type="text" class="search-input" placeholder="Search files..." id="searchInput" />
+        </div>
+        <div class="file-count" id="fileCount">${fileItems.length} files</div>
+    </div>
+    
+    <div class="file-list" id="fileList">
+        ${fileItems.map(file => {
+          const ext = file.name.split('.').pop()?.toLowerCase() || '';
+          const supportedExts = ['js', 'ts', 'tsx', 'jsx', 'json', 'md', 'html', 'css', 'scss', 'py', 'java', 'cpp', 'c', 'h'];
+          const iconClass = supportedExts.includes(ext) ? ext : 'default';
+          return `
+            <div class="file-item" data-path="${file.path}" tabindex="0">
+                <div class="file-icon ${iconClass}"></div>
+                <div class="file-info">
+                    <div class="file-name">${file.name}</div>
+                    ${file.directory ? `<div class="file-path">${file.directory}</div>` : ''}
+                </div>
+            </div>
+          `;
+        }).join('')}
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        let allFiles = ${JSON.stringify(fileItems)};
+        let filteredFiles = [...allFiles];
+        
+        const searchInput = document.getElementById('searchInput');
+        const fileList = document.getElementById('fileList');
+        const fileCount = document.getElementById('fileCount');
+        
+        function getFileExtension(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const supportedExts = ['js', 'ts', 'tsx', 'jsx', 'json', 'md', 'html', 'css', 'scss', 'py', 'java', 'cpp', 'c', 'h'];
+            return supportedExts.includes(ext) ? ext : 'default';
+        }
+        
+        function updateFileList(files) {
+            if (files.length === 0) {
+                fileList.innerHTML = '<div class="no-files">No files found matching your search.</div>';
+                fileCount.textContent = '0 files';
+                return;
+            }
+            
+            fileList.innerHTML = files.map(file => \`
+                <div class="file-item" data-path="\${file.path}" tabindex="0">
+                    <div class="file-icon \${getFileExtension(file.name)}"></div>
+                    <div class="file-info">
+                        <div class="file-name">\${file.name}</div>
+                        \${file.directory ? \`<div class="file-path">\${file.directory}</div>\` : ''}
+                    </div>
+                </div>
+            \`).join('');
+            
+            fileCount.textContent = \`\${files.length} file\${files.length !== 1 ? 's' : ''}\`;
+            
+            // Add event listeners to new items
+            addFileItemListeners();
+        }
+        
+        function addFileItemListeners() {
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    vscode.postMessage({
+                        command: 'openFile',
+                        filePath: item.dataset.path
+                    });
+                });
+                
+                item.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        vscode.postMessage({
+                            command: 'openFile',
+                            filePath: item.dataset.path
+                        });
+                    }
+                });
+            });
+        }
+        
+        // Search functionality with debouncing
+        let searchTimeout;
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                const query = e.target.value.trim();
+                
+                if (!query) {
+                    filteredFiles = [...allFiles];
+                    updateFileList(filteredFiles);
+                    return;
+                }
+                
+                // Client-side filtering for instant response
+                const lowerQuery = query.toLowerCase();
+                filteredFiles = allFiles.filter(file => 
+                    file.name.toLowerCase().includes(lowerQuery) ||
+                    file.relativePath.toLowerCase().includes(lowerQuery)
+                );
+                
+                updateFileList(filteredFiles);
+                
+                // Also notify extension for more sophisticated filtering if needed
+                vscode.postMessage({
+                    command: 'searchFiles',
+                    query: query
+                });
+            }, 150);
+        });
+        
+        // Keyboard navigation
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const firstItem = fileList.querySelector('.file-item');
+                if (firstItem) {
+                    firstItem.focus();
+                }
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                vscode.postMessage({ command: 'close' });
+            }
+        });
+        
+        // Handle navigation within file list
+        fileList.addEventListener('keydown', (e) => {
+            const focusedItem = document.activeElement;
+            if (!focusedItem.classList.contains('file-item')) return;
+            
+            let nextItem;
+            switch (e.key) {
+                case 'ArrowDown':
+                    e.preventDefault();
+                    nextItem = focusedItem.nextElementSibling;
+                    if (nextItem && nextItem.classList.contains('file-item')) {
+                        nextItem.focus();
+                    }
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    if (focusedItem.previousElementSibling) {
+                        focusedItem.previousElementSibling.focus();
+                    } else {
+                        searchInput.focus();
+                    }
+                    break;
+                case 'Home':
+                    e.preventDefault();
+                    const firstItem = fileList.querySelector('.file-item');
+                    if (firstItem) firstItem.focus();
+                    break;
+                case 'End':
+                    e.preventDefault();
+                    const items = fileList.querySelectorAll('.file-item');
+                    if (items.length > 0) items[items.length - 1].focus();
+                    break;
+            }
+        });
+        
+        // Handle messages from extension
+        window.addEventListener('message', event => {
+            const message = event.data;
+            switch (message.command) {
+                case 'updateFiles':
+                    allFiles = message.files;
+                    // If there's a current search, re-apply it
+                    const currentQuery = searchInput.value.trim();
+                    if (currentQuery) {
+                        const lowerQuery = currentQuery.toLowerCase();
+                        filteredFiles = allFiles.filter(file => 
+                            file.name.toLowerCase().includes(lowerQuery) ||
+                            file.relativePath.toLowerCase().includes(lowerQuery)
+                        );
+                    } else {
+                        filteredFiles = [...allFiles];
+                    }
+                    updateFileList(filteredFiles);
+                    break;
+            }
+        });
+        
+        // Initial setup
+        addFileItemListeners();
+        
+        // Focus search input
+        searchInput.focus();
+    </script>
+</body>
+</html>`;
 }
