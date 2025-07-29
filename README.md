@@ -1,5 +1,7 @@
 # 🔭 Telescope-Like Search for VSCode
 
+Please note that, while the ideas are mine, all of the implementation was done by Cursor Agent. I don't intend to learn how to build VSCode Extensions, I just intend to build things I would use. This is purely a "Vibe Coding" project.
+
 A fast and elegant search UI for Visual Studio Code, inspired by Neovim's Telescope plugin.
 
 - ✅ Fuzzy file content search using ripgrep
