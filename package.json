@@ -49,7 +49,6 @@
         "command": "telescopeLikeSearch.filePickerTab",
         "title": "Live Search: File Picker Tab"
       }
-      
     ],
     "keybindings": [
       {
@@ -132,6 +131,16 @@
           "type": "number",
           "default": 1,
           "description": "Number of lines to show in file preview (default: 1)"
+        },
+        "telescopeLikeSearch.showPathInLabel": {
+          "type": "boolean",
+          "default": true,
+          "description": "When enabled, show the file path in the primary label of search results. When disabled, show only the match preview in the label and move the full path to the bottom detail line."
+        },
+        "telescopeLikeSearch.useGitignore": {
+          "type": "boolean",
+          "default": true,
+          "description": "Always respect .gitignore (and other ignore files) when excluding files from search. Disable to search ignored files as well."
         }
       }
     }
