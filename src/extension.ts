@@ -39,6 +39,7 @@ interface SearchConfig {
   recentFolders: string[];
   maxItemsInPicker: number;
   previewLines: number;
+  showPathInLabel: boolean;
 }
 
 // Cache management functions
@@ -93,7 +94,8 @@ function getSearchConfig(): SearchConfig {
     maxFileSize: config.get('maxFileSize', 1048576),
     recentFolders: config.get('recentFolders', []),
     maxItemsInPicker: config.get('maxItemsInPicker', 30),
-    previewLines: config.get('previewLines', 1)
+    previewLines: config.get('previewLines', 1),
+    showPathInLabel: config.get('showPathInLabel', true)
   };
 }
 
@@ -1337,9 +1339,13 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
           if (match) {
             const [, file, lineNum, text] = match;
             const trimmedText = text.trim();
+            const showPathInLabel = getSearchConfig().showPathInLabel;
+            const previewForLabel = trimmedText.length > 120 ? trimmedText.substring(0, 117) + '...' : trimmedText;
+            const itemLabel = showPathInLabel ? `Line ${lineNum}` : previewForLabel;
+            const itemDescription = showPathInLabel ? (trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText) : `Line ${lineNum}`;
             results.push({
-              label: `Line ${lineNum}`,
-              description: trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText,
+              label: itemLabel,
+              description: itemDescription,
               detail: `${path.basename(file)} (Line ${lineNum})`,
               filePath: file,
               line: parseInt(lineNum, 10) - 1,
@@ -1376,9 +1382,13 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
         if (match) {
           const [, file, lineNum, text] = match;
           const trimmedText = text.trim();
+          const showPathInLabel = getSearchConfig().showPathInLabel;
+          const previewForLabel = trimmedText.length > 120 ? trimmedText.substring(0, 117) + '...' : trimmedText;
+          const itemLabel = showPathInLabel ? `Line ${lineNum}` : previewForLabel;
+          const itemDescription = showPathInLabel ? (trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText) : `Line ${lineNum}`;
           results.push({
-            label: `Line ${lineNum}`,
-            description: trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText,
+            label: itemLabel,
+            description: itemDescription,
             detail: `${path.basename(file)} (Line ${lineNum})`,
             filePath: file,
             line: parseInt(lineNum, 10) - 1,
@@ -2284,20 +2294,14 @@ export async function activate(context: vscode.ExtensionContext) {
               if (match) {
                 const [, file, lineNum, text] = match;
                 const trimmedText = text.trim();
-                const relativePath = path.relative(workspaceFolder!, file);
-                // Apply client-side path filters if present
-                const parsedForPath = parseSearchQuery(query);
-                if (parsedForPath.pathIncludes.length > 0) {
-                  const relLower = relativePath.toLowerCase();
-                  const ok = parsedForPath.pathIncludes.every(substr => relLower.includes(substr.toLowerCase()));
-                  if (!ok) {
-                    continue;
-                  }
-                }
+                const showPathInLabel = getSearchConfig().showPathInLabel;
+                const previewForLabel = trimmedText.length > 120 ? trimmedText.substring(0, 117) + '...' : trimmedText;
+                const itemLabel = showPathInLabel ? `Line ${lineNum}` : previewForLabel;
+                const itemDescription = showPathInLabel ? (trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText) : `Line ${lineNum}`;
                 results.push({
-                  label: `${relativePath}:${lineNum}`,
-                  description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
-                  detail: `${file} (Line ${lineNum})`,
+                  label: itemLabel,
+                  description: itemDescription,
+                  detail: `${path.basename(file)} (Line ${lineNum})`,
                   filePath: file,
                   line: parseInt(lineNum, 10) - 1,
                   text: trimmedText
@@ -2333,34 +2337,18 @@ export async function activate(context: vscode.ExtensionContext) {
             if (match) {
               const [, file, lineNum, text] = match;
               const trimmedText = text.trim();
-              const relativePath = path.relative(workspaceFolder!, file);
-              // Apply client-side path filters if present
-              const parsedForPath = parseSearchQuery(query);
-              if (parsedForPath.pathIncludes.length > 0) {
-                const relLower = relativePath.toLowerCase();
-                const ok = parsedForPath.pathIncludes.every(substr => relLower.includes(substr.toLowerCase()));
-                if (!ok) {
-                  // skip adding this trailing result
-                } else {
-                  results.push({
-                    label: `${relativePath}:${lineNum}`,
-                    description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
-                    detail: `${file} (Line ${lineNum})`,
-                    filePath: file,
-                    line: parseInt(lineNum, 10) - 1,
-                    text: trimmedText
-                  });
-                }
-              } else {
-                results.push({
-                  label: `${relativePath}:${lineNum}`,
-                  description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
-                  detail: `${file} (Line ${lineNum})`,
-                  filePath: file,
-                  line: parseInt(lineNum, 10) - 1,
-                  text: trimmedText
-                });
-              }
+              const showPathInLabel = getSearchConfig().showPathInLabel;
+              const previewForLabel = trimmedText.length > 120 ? trimmedText.substring(0, 117) + '...' : trimmedText;
+              const itemLabel = showPathInLabel ? `Line ${lineNum}` : previewForLabel;
+              const itemDescription = showPathInLabel ? (trimmedText.length > 100 ? trimmedText.substring(0, 97) + '...' : trimmedText) : `Line ${lineNum}`;
+              results.push({
+                label: itemLabel,
+                description: itemDescription,
+                detail: `${path.basename(file)} (Line ${lineNum})`,
+                filePath: file,
+                line: parseInt(lineNum, 10) - 1,
+                text: trimmedText
+              });
             }
           }
 
