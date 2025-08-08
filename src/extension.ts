@@ -1346,7 +1346,7 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
             results.push({
               label: itemLabel,
               description: itemDescription,
-              detail: `${path.basename(file)} (Line ${lineNum})`,
+              detail: `${file}:${lineNum}`,
               filePath: file,
               line: parseInt(lineNum, 10) - 1,
               text: trimmedText
@@ -1389,7 +1389,7 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
           results.push({
             label: itemLabel,
             description: itemDescription,
-            detail: `${path.basename(file)} (Line ${lineNum})`,
+            detail: `${file}:${lineNum}`,
             filePath: file,
             line: parseInt(lineNum, 10) - 1,
             text: trimmedText
@@ -2301,7 +2301,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 results.push({
                   label: itemLabel,
                   description: itemDescription,
-                  detail: `${path.basename(file)} (Line ${lineNum})`,
+                  detail: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
                   filePath: file,
                   line: parseInt(lineNum, 10) - 1,
                   text: trimmedText
@@ -2344,7 +2344,7 @@ export async function activate(context: vscode.ExtensionContext) {
               results.push({
                 label: itemLabel,
                 description: itemDescription,
-                detail: `${path.basename(file)} (Line ${lineNum})`,
+                detail: `${path.relative(workspaceFolder!, file)}:${lineNum}`,
                 filePath: file,
                 line: parseInt(lineNum, 10) - 1,
                 text: trimmedText
