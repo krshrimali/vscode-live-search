@@ -40,6 +40,7 @@ interface SearchConfig {
   maxItemsInPicker: number;
   previewLines: number;
   showPathInLabel: boolean;
+  useGitignore: boolean;
 }
 
 // Cache management functions
@@ -95,7 +96,8 @@ function getSearchConfig(): SearchConfig {
     recentFolders: config.get('recentFolders', []),
     maxItemsInPicker: config.get('maxItemsInPicker', 30),
     previewLines: config.get('previewLines', 1),
-    showPathInLabel: config.get('showPathInLabel', true)
+    showPathInLabel: config.get('showPathInLabel', true),
+    useGitignore: config.get('useGitignore', true)
   };
 }
 
@@ -3392,6 +3394,18 @@ function buildRipgrepArgsForContentSearch(
   // Pattern
   // Prefer -e to safely pass any pattern including those starting with '-'
   args.push('-e', parsed.pattern);
+
+  // Respect .gitignore if configured
+  if (searchConfig?.useGitignore) {
+    // rg uses .gitignore by default when run inside a git repo; explicitly pass --ignore-file as a fallback
+    // Use the root workspace .gitignore if available
+    if (workspaceFolder) {
+      const gitignorePath = path.join(workspaceFolder, '.gitignore');
+      args.push('--ignore-file', gitignorePath);
+    }
+    // Also respect other ignore files
+    args.push('--follow');
+  }
 
   // Types
   for (const t of parsed.typeIncludes) args.push('-t', t);

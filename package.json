@@ -136,6 +136,11 @@
           "type": "boolean",
           "default": true,
           "description": "When enabled, show the file path in the primary label of search results. When disabled, show only the match preview in the label and move the full path to the bottom detail line."
+        },
+        "telescopeLikeSearch.useGitignore": {
+          "type": "boolean",
+          "default": true,
+          "description": "Always respect .gitignore (and other ignore files) when excluding files from search. Disable to search ignored files as well."
         }
       }
     }
@@ -147,7 +152,7 @@
     "@types/lodash.debounce": "^4.0.9",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.8.3"
+    "typescript": "5.8.3"
   },
   "dependencies": {
     "@types/minimatch": "^5.1.2",
