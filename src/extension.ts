@@ -1299,17 +1299,16 @@ async function launchSearchInFileQuickPick(selectedFile: string) {
     quickPick.busy = true;
     outputChannel.appendLine(`[Live Search] Running ripgrep in file: ${selectedFile} | Query: "${query}"`);
 
-    const ripgrepArgs = [
+    // Build advanced args
+    const parsed = parseSearchQuery(query);
+    const baseArgs = [
       '--vimgrep',
-      '--smart-case',
       '--no-heading',
       '--color', 'never',
-      '--text',
       '--line-number',
-      '--max-count', MAX_SEARCH_RESULTS.toString(),
-      query,
-      selectedFile
+      '--max-count', MAX_SEARCH_RESULTS.toString()
     ];
+    const ripgrepArgs = buildRipgrepArgsForContentSearch(baseArgs, parsed, selectedFile, true);
 
     currentProcess = spawn('rg', ripgrepArgs, { 
       cwd: workspaceFolder
@@ -2212,7 +2211,10 @@ export async function activate(context: vscode.ExtensionContext) {
       let currentProcess: ReturnType<typeof spawn> | null = null;
 
       const runRipgrep = (query: string) => {
-        if (currentProcess) currentProcess.kill();
+        if (currentProcess) {
+          currentProcess.kill();
+          currentProcess = null;
+        }
         if (!query || query.length < 2) {
           quickPick.items = [];
           quickPick.busy = false;
@@ -2232,26 +2234,15 @@ export async function activate(context: vscode.ExtensionContext) {
         quickPick.busy = true;
 
         const searchConfig = getSearchConfig();
-        const ripgrepArgs = [
+        // Build advanced args using parsed query
+        const parsed = parseSearchQuery(query);
+        const baseArgs = [
           '--vimgrep',
-          '--smart-case',
-          '--hidden',
           '--no-heading',
           '--color', 'never',
-          '--max-count', MAX_SEARCH_RESULTS.toString(),
-          '--text',
-          '--max-filesize', searchConfig.maxFileSize.toString(),
-          query,
-          searchFolder
+          '--max-count', MAX_SEARCH_RESULTS.toString()
         ];
-
-        // Add include/exclude patterns
-        searchConfig.includePatterns.forEach(pattern => {
-          ripgrepArgs.push('--glob', pattern);
-        });
-        searchConfig.excludePatterns.forEach(pattern => {
-          ripgrepArgs.push('--glob', `!${pattern}`);
-        });
+        const ripgrepArgs = buildRipgrepArgsForContentSearch(baseArgs, parsed, searchFolder, false, searchConfig);
 
         currentProcess = spawn('rg', ripgrepArgs, { 
           cwd: workspaceFolder
@@ -2294,6 +2285,15 @@ export async function activate(context: vscode.ExtensionContext) {
                 const [, file, lineNum, text] = match;
                 const trimmedText = text.trim();
                 const relativePath = path.relative(workspaceFolder!, file);
+                // Apply client-side path filters if present
+                const parsedForPath = parseSearchQuery(query);
+                if (parsedForPath.pathIncludes.length > 0) {
+                  const relLower = relativePath.toLowerCase();
+                  const ok = parsedForPath.pathIncludes.every(substr => relLower.includes(substr.toLowerCase()));
+                  if (!ok) {
+                    continue;
+                  }
+                }
                 results.push({
                   label: `${relativePath}:${lineNum}`,
                   description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
@@ -2334,14 +2334,33 @@ export async function activate(context: vscode.ExtensionContext) {
               const [, file, lineNum, text] = match;
               const trimmedText = text.trim();
               const relativePath = path.relative(workspaceFolder!, file);
-              results.push({
-                label: `${relativePath}:${lineNum}`,
-                description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
-                detail: `${file} (Line ${lineNum})`,
-                filePath: file,
-                line: parseInt(lineNum, 10) - 1,
-                text: trimmedText
-              });
+              // Apply client-side path filters if present
+              const parsedForPath = parseSearchQuery(query);
+              if (parsedForPath.pathIncludes.length > 0) {
+                const relLower = relativePath.toLowerCase();
+                const ok = parsedForPath.pathIncludes.every(substr => relLower.includes(substr.toLowerCase()));
+                if (!ok) {
+                  // skip adding this trailing result
+                } else {
+                  results.push({
+                    label: `${relativePath}:${lineNum}`,
+                    description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
+                    detail: `${file} (Line ${lineNum})`,
+                    filePath: file,
+                    line: parseInt(lineNum, 10) - 1,
+                    text: trimmedText
+                  });
+                }
+              } else {
+                results.push({
+                  label: `${relativePath}:${lineNum}`,
+                  description: trimmedText.length > 80 ? trimmedText.substring(0, 77) + '...' : trimmedText,
+                  detail: `${file} (Line ${lineNum})`,
+                  filePath: file,
+                  line: parseInt(lineNum, 10) - 1,
+                  text: trimmedText
+                });
+              }
             }
           }
 
@@ -3216,4 +3235,197 @@ function getFilePickerTabContent(files: string[], workspaceRoot: string, preview
     </script>
 </body>
 </html>`;
+}
+
+// Add: helper types and query parsing utilities for advanced search features
+interface ParsedQuery {
+  raw: string;
+  pattern: string; // main search pattern (literal or regex)
+  isRegex: boolean;
+  ignoreCase: boolean | 'smart';
+  wordMatch: boolean; // -w
+  usePCRE2: boolean; // --pcre2 (for lookbehind, etc.)
+  fixedStrings: boolean; // -F
+  multiline: boolean; // --multiline
+  globs: string[]; // --glob entries
+  typeIncludes: string[]; // -t
+  typeExcludes: string[]; // -T
+  pathIncludes: string[]; // extra path substrings to filter client-side
+}
+
+function hasRegexMeta(input: string): boolean {
+  // Rough heuristic; if true and not quoted as /.../, treat as regex-ish and avoid -F
+  // Common regex meta chars
+  return /[.*+?^${}()|\[\]\\]/.test(input);
+}
+
+function needsPCRE2(pattern: string): boolean {
+  // Lookbehind and some advanced constructs require PCRE2
+  return /(\(\?<=|\(\?<!|\(\?>|\(\?R|\(\?&)/.test(pattern);
+}
+
+function parseSearchQuery(rawQuery: string): ParsedQuery {
+  const query = rawQuery.trim();
+  const result: ParsedQuery = {
+    raw: rawQuery,
+    pattern: query,
+    isRegex: false,
+    ignoreCase: 'smart',
+    wordMatch: false,
+    usePCRE2: false,
+    fixedStrings: false,
+    multiline: false,
+    globs: [],
+    typeIncludes: [],
+    typeExcludes: [],
+    pathIncludes: []
+  };
+
+  if (!query) return result;
+
+  // 1) /regex/flags syntax
+  const slashRegex = /^\/(.*)\/(.*)?$/s; // allow flags like i,m,s
+  const slashMatch = query.match(slashRegex);
+  if (slashMatch) {
+    result.isRegex = true;
+    result.pattern = slashMatch[1];
+    const flags = (slashMatch[2] || '').toLowerCase();
+    if (flags.includes('i')) result.ignoreCase = true;
+    if (flags.includes('w')) result.wordMatch = true;
+    if (flags.includes('m')) result.multiline = true;
+    if (flags.includes('p')) result.usePCRE2 = true; // explicit p flag
+    // If literal indicator 'F' present, although uncommon in regex context, respect it
+    if (flags.includes('f')) {
+      result.isRegex = false;
+      result.fixedStrings = true;
+    }
+    if (!result.usePCRE2 && needsPCRE2(result.pattern)) result.usePCRE2 = true;
+    return result;
+  }
+
+  // 2) re:pattern (regex)
+  if (query.startsWith('re:')) {
+    result.isRegex = true;
+    result.pattern = query.slice(3);
+    if (!result.usePCRE2 && needsPCRE2(result.pattern)) result.usePCRE2 = true;
+    return result;
+  }
+
+  // 3) token parsing: key:value terms separated by spaces; last bare token is the pattern
+  // Supported keys: glob, g, type, t, -type, T, ext, path, p, case, w
+  const tokens = query.split(/\s+/);
+  const remaining: string[] = [];
+
+  for (const tok of tokens) {
+    const m = tok.match(/^([a-zA-Z-]+):(.*)$/);
+    if (!m) {
+      remaining.push(tok);
+      continue;
+    }
+    const key = m[1];
+    const val = m[2];
+    if (!val) continue;
+
+    switch (key) {
+      case 'glob':
+      case 'g':
+        result.globs.push(val);
+        break;
+      case 'type':
+      case 't':
+        result.typeIncludes.push(val);
+        break;
+      case '-type':
+      case 'T':
+        result.typeExcludes.push(val);
+        break;
+      case 'ext':
+        result.globs.push(`**/*.${val}`);
+        break;
+      case 'path':
+      case 'p':
+        result.pathIncludes.push(val);
+        break;
+      case 'case':
+        if (val === 'smart') result.ignoreCase = 'smart';
+        else if (val === 'yes' || val === 'true' || val === 'sensitive' || val === 'cs') result.ignoreCase = false;
+        else if (val === 'no' || val === 'false' || val === 'insensitive' || val === 'ci') result.ignoreCase = true;
+        break;
+      case 'w':
+      case 'word':
+        if (val === '1' || val === 'true' || val === 'yes') result.wordMatch = true;
+        break;
+      case 'regex':
+        result.isRegex = true;
+        result.pattern = val;
+        if (!result.usePCRE2 && needsPCRE2(result.pattern)) result.usePCRE2 = true;
+        break;
+      default:
+        remaining.push(tok);
+        break;
+    }
+  }
+
+  // Rebuild pattern from remaining tokens (space-joined)
+  result.pattern = remaining.join(' ').trim();
+
+  // Decide fixed-string vs regex when not explicitly set
+  if (!result.isRegex) {
+    result.fixedStrings = !hasRegexMeta(result.pattern);
+  }
+
+  return result;
+}
+
+function buildRipgrepArgsForContentSearch(
+  baseArgs: string[],
+  parsed: ParsedQuery,
+  searchFolderOrFile: string,
+  isFileScope: boolean,
+  searchConfig?: SearchConfig
+): string[] {
+  const args = [...baseArgs];
+
+  // Performance-friendly defaults
+  args.push('--line-buffered');
+  args.push('--no-config');
+
+  // Case handling
+  if (parsed.ignoreCase === true) args.push('--ignore-case');
+  else if (parsed.ignoreCase === false) args.push('--case-sensitive');
+  else args.push('--smart-case');
+
+  if (parsed.wordMatch) args.push('--word-regexp');
+  if (parsed.multiline) args.push('--multiline');
+
+  if (parsed.usePCRE2) args.push('--pcre2');
+  if (parsed.fixedStrings && !parsed.isRegex) args.push('--fixed-strings');
+
+  // Pattern
+  // Prefer -e to safely pass any pattern including those starting with '-'
+  args.push('-e', parsed.pattern);
+
+  // Types
+  for (const t of parsed.typeIncludes) args.push('-t', t);
+  for (const t of parsed.typeExcludes) args.push('-T', t);
+
+  // Globs from query
+  for (const g of parsed.globs) args.push('--glob', g);
+
+  // Config-based include/exclude only for workspace scans
+  if (!isFileScope && searchConfig) {
+    searchConfig.includePatterns.forEach(pattern => args.push('--glob', pattern));
+    searchConfig.excludePatterns.forEach(pattern => args.push('--glob', `!${pattern}`));
+    // File size limit only makes sense for workspace scope
+    args.push('--max-filesize', searchConfig.maxFileSize.toString());
+  }
+
+  // Always search text, include hidden files but typical exclusions are applied via globs
+  if (!args.includes('--text')) args.push('--text');
+  if (!args.includes('--hidden')) args.push('--hidden');
+
+  // Scope target
+  args.push(searchFolderOrFile);
+
+  return args;
 }
